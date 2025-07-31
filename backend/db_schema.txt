@@ -1,0 +1,67 @@
+-- Users table
+CREATE TABLE users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    role ENUM('admin', 'engineer', 'viewer') DEFAULT 'engineer',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Oil fields table
+CREATE TABLE oil_fields (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    location VARCHAR(255),
+    status ENUM('active', 'inactive') DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Reports table
+CREATE TABLE reports (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    oil_field_id INT,
+    report_date DATE NOT NULL,
+    status ENUM('pending', 'processing', 'completed', 'error') DEFAULT 'pending',
+    uploaded_by INT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (oil_field_id) REFERENCES oil_fields(id),
+    FOREIGN KEY (uploaded_by) REFERENCES users(id)
+);
+
+-- Field data table
+CREATE TABLE field_data (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    report_id INT,
+    parameter_name VARCHAR(255) NOT NULL,
+    parameter_value DECIMAL(15,4),
+    unit VARCHAR(50),
+    confidence_score DECIMAL(3,2),
+    is_verified BOOLEAN DEFAULT FALSE,
+    verified_by INT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (report_id) REFERENCES reports(id),
+    FOREIGN KEY (verified_by) REFERENCES users(id)
+);
+
+-- Images table
+CREATE TABLE uploaded_images (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    report_id INT,
+    file_path VARCHAR(500) NOT NULL,
+    original_filename VARCHAR(255),
+    file_size INT,
+    ocr_status ENUM('pending', 'processing', 'completed', 'failed') DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (report_id) REFERENCES reports(id)
+);
+
+-- Sample data
+INSERT INTO users (email, password, name, role) VALUES 
+('admin@fieldviz.com', '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'Demo Admin', 'admin'),
+('engineer@fieldviz.com', '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'Field Engineer', 'engineer');
+
+INSERT INTO oil_fields (name, location) VALUES 
+('West Texas Field A', 'Midland, TX'),
+('North Dakota Field B', 'Williston, ND'),
+('Oklahoma Field C', 'Oklahoma City, OK');
