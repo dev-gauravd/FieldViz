@@ -28,7 +28,8 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const savedToken = localStorage.getItem('fieldviz_token');
+  //  Use 'token' instead of 'fieldviz_token' to match api.ts
+    const savedToken = localStorage.getItem('token');
     if (savedToken) {
       setToken(savedToken);
       fetchUser();
@@ -52,11 +53,13 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const login = async (email: string, password: string) => {
     try {
       console.log('Attempting login with:', email); // Debug log
-      const response = await authAPI.login({ email, password });
+      // 👈 FIXED: Pass email and password as separate parameters, not as an object
+      const response = await authAPI.login(email, password);
       console.log('Login response:', response); // Debug log
       setToken(response.token);
       setUser(response.user);
-      localStorage.setItem('fieldviz_token', response.token);
+      // 👈 FIXED: Use consistent token key
+      localStorage.setItem('token', response.token); // Changed from 'fieldviz_token' to 'token'
     } catch (error) {
       console.error('Login error:', error); // Debug log
       throw error;
@@ -64,10 +67,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const logout = () => {
-    setUser(null);
-    setToken(null);
-    localStorage.removeItem('fieldviz_token');
-  };
+  setUser(null);
+  setToken(null);
+  // 👈 FIXED: Use 'token' consistently
+  localStorage.removeItem('token');
+};
 
   return (
     <AuthContext.Provider value={{ user, token, login, logout, loading }}>

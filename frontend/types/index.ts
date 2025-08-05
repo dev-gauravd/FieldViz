@@ -1,3 +1,9 @@
+declare global {
+  interface Window {
+    addNotification?: (notification: Omit<Notification, 'id' | 'timestamp'>) => void;
+  }
+}
+
 export interface User {
   id: number;
   email: string;
@@ -12,10 +18,10 @@ export interface LoginCredentials {
 
 export interface DashboardDataPoint {
   date: string;
-  oil_production?: number;
-  gas_production?: number;
-  wellhead_pressure?: number;
-  temperature?: number;
+  oil_production: number;
+  gas_production: number;
+  wellhead_pressure: number;
+  temperature: number;
 }
 
 export interface Metric {
@@ -38,3 +44,4 @@ export interface OCRResult {
   unit: string;
   confidence_score: number;
 }
+

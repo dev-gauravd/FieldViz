@@ -3,6 +3,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { createWorker, PSM } from 'tesseract.js';
 import { Upload, FileText, CheckCircle, AlertCircle, Edit2, Save, X, Camera, Zap } from 'lucide-react';
+import Image from 'next/image';
 import { useAuth } from '../contexts/AuthContext';
 
 // Types for oil field data
@@ -24,6 +25,13 @@ interface OCRResult {
     confidence: number;
     bbox: { x0: number; y0: number; x1: number; y1: number };
   }>;
+}
+
+// Define proper type for Tesseract word object
+interface TesseractWord {
+  text: string;
+  confidence: number;
+  bbox: { x0: number; y0: number; x1: number; y1: number };
 }
 
 // Common oil field parameters and their units
@@ -77,7 +85,7 @@ const OilFieldOCR: React.FC = () => {
         
         await workerRef.current.setParameters({
           tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,°%/-() ',
-          tessedit_pageseg_mode: PSM.SINGLE_UNIFORM_BLOCK,
+          tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
         });
       } catch (error) {
         console.error('Failed to initialize OCR worker:', error);
@@ -165,7 +173,7 @@ const OilFieldOCR: React.FC = () => {
       const ocrResult: OCRResult = {
         text: data.text,
         confidence: data.confidence || 0,
-        words: data.words ? data.words.map((word: any) => ({
+        words: data.words ? data.words.map((word: TesseractWord) => ({
           text: word.text,
           confidence: word.confidence,
           bbox: word.bbox
@@ -183,8 +191,8 @@ const OilFieldOCR: React.FC = () => {
     }
   };
 
-  // Handle file upload
-  const handleFileUpload = (file: File) => {
+  // Handle file upload - memoized to prevent infinite re-renders
+  const handleFileUpload = useCallback((file: File) => {
     if (!file.type.startsWith('image/')) {
       setError('Please upload an image file');
       return;
@@ -196,7 +204,7 @@ const OilFieldOCR: React.FC = () => {
     }
 
     processImage(file);
-  };
+  }, []); // Empty dependency array since processImage uses state setters
 
   // Drag and drop handlers
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -217,7 +225,7 @@ const OilFieldOCR: React.FC = () => {
     if (files.length > 0) {
       handleFileUpload(files[0]);
     }
-  }, []);
+  }, [handleFileUpload]); // Now properly includes the dependency
 
   // Edit data point
   const toggleEdit = (id: string) => {
@@ -430,11 +438,17 @@ const OilFieldOCR: React.FC = () => {
               <FileText className="h-5 w-5 mr-2" />
               Uploaded Image
             </h3>
-            <img
-              src={uploadedImage}
-              alt="Uploaded field data"
-              className="w-full h-auto rounded-lg border shadow-sm"
-            />
+            <div className="relative w-full h-auto rounded-lg border shadow-sm overflow-hidden">
+              <Image
+                src={uploadedImage}
+                alt="Uploaded field data"
+                width={800}
+                height={600}
+                className="w-full h-auto"
+                style={{ objectFit: 'contain' }}
+                priority
+              />
+            </div>
           </div>
 
           {/* Extracted Data */}
@@ -516,7 +530,7 @@ const OilFieldOCR: React.FC = () => {
                   )}
 
                   <div className="text-xs text-gray-500 mt-2 p-2 bg-gray-50 rounded">
-                    <strong>Original:</strong> "{item.originalText}"
+                    <strong>Original:</strong> &quot;{item.originalText}&quot;
                   </div>
                 </div>
               ))}
