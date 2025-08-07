@@ -5,6 +5,7 @@
 /.pnp
 .pnp.js
 /*.min.js
+/*venv/*
 
 /frontend/node_modules
 

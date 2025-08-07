@@ -1,21 +1,21 @@
 'use client';
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { createWorker, PSM } from 'tesseract.js';
+import { createWorker, PSM, OEM } from 'tesseract.js';
 import { Upload, FileText, CheckCircle, AlertCircle, Edit2, Save, X, Camera, Zap, Grid, Download, Eye, EyeOff, FileImage, FileX } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
-// PDF.js types (you'll need to install: npm install pdfjs-dist)
+// PDF.js types
 declare global {
   interface Window {
     pdfjsLib: any;
   }
 }
 
-// Enhanced types for complex oil field data
-interface WellDataPoint {
+// Enhanced types for gas compressor monitoring data
+interface CompressorDataPoint {
   id: string;
-  wellName: string;
+  timeReading: string;
   date: string;
   parameters: {
     [key: string]: {
@@ -29,18 +29,24 @@ interface WellDataPoint {
   isVerified: boolean;
 }
 
-interface TableCell {
-  text: string;
-  confidence: number;
-  position: { x: number; y: number; width: number; height: number };
-  row: number;
-  col: number;
+interface OCRData {
+  text?: string;
+  words?: {
+    text: string;
+    confidence: number;
+    bbox: {
+      x0: number;
+      y0: number;
+      x1: number;
+      y1: number;
+    };
+  }[];
 }
 
 interface ExtractedTable {
   headers: string[];
-  rows: TableCell[][];
-  wellData: WellDataPoint[];
+  rows: any[][];
+  wellData: CompressorDataPoint[]; // Keeping same interface name for compatibility
 }
 
 interface PDFPageInfo {
@@ -50,17 +56,413 @@ interface PDFPageInfo {
   canvas: HTMLCanvasElement;
 }
 
-// Common oil field parameters mapping
-const PARAMETER_MAPPING = {
-  'oil': { fullName: 'Oil Production', units: ['BBL', 'bbl', 'STB', 'stb'] },
-  'gas': { fullName: 'Gas Production', units: ['MCF', 'mcf', 'MSCF', 'mscf', 'SCF'] },
-  'water': { fullName: 'Water Production', units: ['BBL', 'bbl', 'STB', 'stb'] },
-  'pressure': { fullName: 'Pressure', units: ['PSI', 'psi', 'PSIG', 'psig'] },
-  'temp': { fullName: 'Temperature', units: ['°F', 'F', 'deg'] },
-  'cut': { fullName: 'Water Cut', units: ['%', 'percent'] },
-  'rate': { fullName: 'Flow Rate', units: ['BPD', 'bpd', 'BOPD'] },
-  'choke': { fullName: 'Choke Size', units: ['/64', '64ths'] },
-  'gor': { fullName: 'Gas Oil Ratio', units: ['SCF/BBL', 'scf/bbl'] }
+// SPECIALIZED: Gas Compressor Column Definitions based on your header image
+interface CompressorColumn {
+  id: string;
+  mainHeader: string;
+  subHeader: string;
+  unit: string;
+  expectedXPosition: number; // Approximate X coordinate
+  tolerance: number; // X-coordinate tolerance
+}
+
+const GAS_COMPRESSOR_COLUMNS: CompressorColumn[] = [
+  // Time column
+  { id: 'time', mainHeader: 'Time', subHeader: 'hrs', unit: 'hrs', expectedXPosition: 50, tolerance: 25 },
+  
+  // Frame Lube Oil group
+  { id: 'frame_lube_press', mainHeader: 'Frame Lube Oil', subHeader: 'Press', unit: 'Kg/cm²', expectedXPosition: 110, tolerance: 20 },
+  { id: 'frame_lube_temp', mainHeader: 'Frame Lube Oil', subHeader: 'Temp', unit: '°C', expectedXPosition: 150, tolerance: 20 },
+  { id: 'oil_filter_dp', mainHeader: 'Frame Lube Oil', subHeader: 'Oil Filter ΔP', unit: '', expectedXPosition: 190, tolerance: 20 },
+  { id: 'frame_lube_level', mainHeader: 'Frame Lube Oil', subHeader: 'Level', unit: '%', expectedXPosition: 230, tolerance: 20 },
+  
+  // Frame Bearing Temp group  
+  { id: 'cw_out_temp', mainHeader: 'Frame Bearing Temp', subHeader: 'CW Out Temp', unit: '°C', expectedXPosition: 270, tolerance: 20 },
+  { id: 'brg_1', mainHeader: 'Frame Bearing Temp', subHeader: 'BRG #1', unit: '°C', expectedXPosition: 310, tolerance: 20 },
+  { id: 'brg_2', mainHeader: 'Frame Bearing Temp', subHeader: 'BRG #2', unit: '°C', expectedXPosition: 350, tolerance: 20 },
+  { id: 'brg_3', mainHeader: 'Frame Bearing Temp', subHeader: 'BRG #3', unit: '°C', expectedXPosition: 390, tolerance: 20 },
+  { id: 'brg_4', mainHeader: 'Frame Bearing Temp', subHeader: 'BRG #4', unit: '°C', expectedXPosition: 430, tolerance: 20 },
+  
+  // 1st stage cylinder group
+  { id: 'stage1_suction_press', mainHeader: '1st Stage Cylinder', subHeader: 'Suction Press', unit: 'Kg/cm²', expectedXPosition: 470, tolerance: 20 },
+  { id: 'stage1_suction_temp', mainHeader: '1st Stage Cylinder', subHeader: 'Suction Temp', unit: '°C', expectedXPosition: 510, tolerance: 20 },
+  { id: 'stage1_discharge_press', mainHeader: '1st Stage Cylinder', subHeader: 'Discharge Press', unit: 'Kg/cm²', expectedXPosition: 550, tolerance: 20 },
+  { id: 'stage1_discharge_temp', mainHeader: '1st Stage Cylinder', subHeader: 'Discharge Temp', unit: '°C', expectedXPosition: 590, tolerance: 20 },
+  
+  // 2nd stage cylinder group
+  { id: 'stage2_suction_press', mainHeader: '2nd Stage Cylinder', subHeader: 'Suction Press', unit: 'Kg/cm²', expectedXPosition: 630, tolerance: 20 },
+  { id: 'stage2_suction_temp', mainHeader: '2nd Stage Cylinder', subHeader: 'Suction Temp', unit: '°C', expectedXPosition: 670, tolerance: 20 },
+  { id: 'stage2_discharge_press', mainHeader: '2nd Stage Cylinder', subHeader: 'Discharge Press', unit: 'Kg/cm²', expectedXPosition: 710, tolerance: 20 },
+  { id: 'stage2_discharge_temp', mainHeader: '2nd Stage Cylinder', subHeader: 'Discharge Temp', unit: '°C', expectedXPosition: 750, tolerance: 20 },
+  
+  // After cooler Separator group
+  { id: 'aftercooler_lubricator', mainHeader: 'After Cooler Separator', subHeader: 'Lubricator', unit: '', expectedXPosition: 790, tolerance: 20 },
+  { id: 'aftercooler_pressure', mainHeader: 'After Cooler Separator', subHeader: 'Pressure', unit: 'Kg/cm²', expectedXPosition: 830, tolerance: 20 },
+  { id: 'aftercooler_temp', mainHeader: 'After Cooler Separator', subHeader: 'Temp', unit: '°C', expectedXPosition: 870, tolerance: 20 },
+  { id: 'aftercooler_operating', mainHeader: 'After Cooler Separator', subHeader: 'Operating', unit: '', expectedXPosition: 910, tolerance: 20 },
+  
+  // Cooling Water group
+  { id: 'cooling_level', mainHeader: 'Cooling Water', subHeader: 'Level', unit: '%', expectedXPosition: 950, tolerance: 20 },
+  { id: 'cooling_press', mainHeader: 'Cooling Water', subHeader: 'Press', unit: 'Kg/cm²', expectedXPosition: 990, tolerance: 20 },
+  { id: 'cooling_temp', mainHeader: 'Cooling Water', subHeader: 'Temp', unit: '°C', expectedXPosition: 1030, tolerance: 20 },
+  { id: 'motor_amp', mainHeader: 'Cooling Water', subHeader: 'Motor Amp', unit: 'A', expectedXPosition: 1070, tolerance: 20 },
+  
+  // Cylinder CW out temp group
+  { id: 'cyl_cw_1', mainHeader: 'Cylinder CW Out Temp', subHeader: 'Cyl #1', unit: '°C', expectedXPosition: 1110, tolerance: 20 },
+  { id: 'cyl_cw_2', mainHeader: 'Cylinder CW Out Temp', subHeader: 'Cyl #2', unit: '°C', expectedXPosition: 1150, tolerance: 20 },
+  { id: 'cyl_cw_3', mainHeader: 'Cylinder CW Out Temp', subHeader: 'Cyl #3', unit: '°C', expectedXPosition: 1190, tolerance: 20 },
+  { id: 'cyl_cw_4', mainHeader: 'Cylinder CW Out Temp', subHeader: 'Cyl #4', unit: '°C', expectedXPosition: 1230, tolerance: 20 },
+  
+  // Final columns
+  { id: 'control_valve_pos', mainHeader: 'Control Valve Position', subHeader: '%', unit: '%', expectedXPosition: 1270, tolerance: 20 },
+  { id: 'engine_speed', mainHeader: 'Engine Speed', subHeader: 'RPM', unit: 'RPM', expectedXPosition: 1310, tolerance: 20 },
+  { id: 'engine_load', mainHeader: 'Engine Load', subHeader: '%', unit: '%', expectedXPosition: 1350, tolerance: 20 },
+  { id: 'instrument_air', mainHeader: 'Instrument Air Pressure', subHeader: 'Press', unit: 'Kg/cm²', expectedXPosition: 1390, tolerance: 20 },
+  { id: 'gas_flow', mainHeader: 'Gas Flow', subHeader: 'Sm³/Hr', unit: 'Sm³/Hr', expectedXPosition: 1450, tolerance: 30 }
+];
+
+// SPECIALIZED: Gas compressor data extraction
+const specializedGasCompressorExtraction = (ocrData: any): CompressorDataPoint[] => {
+  const words = ocrData.words || [];
+  if (words.length === 0) {
+    console.warn('[COMPRESSOR] No words found in OCR data');
+    return [];
+  }
+
+  console.log(`[COMPRESSOR] Processing ${words.length} words for gas compressor data extraction`);
+
+  // Step 1: Find all time-based data rows (look for HH:MM pattern)
+  const timeWords = words.filter((word: any) => {
+    const timePattern = /^\d{1,2}[\.:]\d{2}$/;
+    return timePattern.test(word.text.trim());
+  });
+
+  console.log(`[COMPRESSOR] Found ${timeWords.length} time entries:`, timeWords.map((w: any) => w.text));
+
+  if (timeWords.length === 0) {
+    console.error('[COMPRESSOR] No time patterns found in expected format');
+    
+    // Alternative: Look for numeric patterns that might be times
+    const possibleTimes = words.filter((word: any) => {
+      const text = word.text.trim();
+      return /^\d{1,2}$/.test(text) || /^\d{1,2}[\.:]\d{2}$/.test(text);
+    });
+    
+    console.log(`[COMPRESSOR] Found ${possibleTimes.length} possible time indicators:`, possibleTimes.map((w: any) => w.text));
+    
+    if (possibleTimes.length === 0) {
+      return [];
+    }
+  }
+
+  // Step 2: For each time entry, extract the corresponding row data
+  const extractedRows: CompressorDataPoint[] = [];
+  const rowTolerance = 25; // pixels
+
+  (timeWords.length > 0 ? timeWords : words.filter((w: any) => /^\d{1,2}$/.test(w.text.trim()))).forEach((timeWord: any, rowIndex: number) => {
+    const timeY = (timeWord.bbox.y0 + timeWord.bbox.y1) / 2;
+    
+    // Find all words in the same row (similar Y coordinate)
+    const rowWords = words.filter((word: any) => {
+      if (word === timeWord) return false;
+      const wordY = (word.bbox.y0 + word.bbox.y1) / 2;
+      return Math.abs(wordY - timeY) <= rowTolerance;
+    });
+
+    console.log(`[COMPRESSOR] Row ${rowIndex} (${timeWord.text}): Found ${rowWords.length} potential data values`);
+
+    // Step 3: Map each word to its corresponding column based on X coordinate
+    const parameters: CompressorDataPoint['parameters'] = {};
+    let parametersFound = 0;
+
+    rowWords.forEach((word: any) => {
+      const wordX = (word.bbox.x0 + word.bbox.x1) / 2;
+      
+      // Find which column this word belongs to
+      const column = GAS_COMPRESSOR_COLUMNS.find(col => 
+        Math.abs(wordX - col.expectedXPosition) <= col.tolerance
+      );
+
+      if (column) {
+        // Clean and validate the value
+        const cleanedText = word.text.trim().replace(/[^\d.,]/g, '');
+        const numericMatch = cleanedText.match(/(\d+\.?\d*)/);
+        
+        if (numericMatch) {
+          const value = parseFloat(numericMatch[1]);
+          if (!isNaN(value) && value >= 0) {
+            const fullParamName = `${column.mainHeader} - ${column.subHeader}`;
+            parameters[fullParamName] = {
+              value: value.toString(),
+              unit: column.unit,
+              confidence: (word.confidence || 0.85) * 0.9, // Slight penalty for processing
+              cellPosition: { row: rowIndex, col: parametersFound },
+              isEditing: false
+            };
+            parametersFound++;
+            
+            console.log(`[COMPRESSOR] ✓ Mapped "${word.text}" → "${fullParamName}": ${value} ${column.unit} (X=${Math.round(wordX)})`);
+          }
+        } else if (word.text.trim().length > 0) {
+          // Handle non-numeric indicators (checkmarks, status indicators)
+          const fullParamName = `${column.mainHeader} - ${column.subHeader}`;
+          parameters[fullParamName] = {
+            value: word.text.trim(),
+            unit: column.unit,
+            confidence: (word.confidence || 0.7) * 0.8,
+            cellPosition: { row: rowIndex, col: parametersFound },
+            isEditing: false
+          };
+          parametersFound++;
+          
+          console.log(`[COMPRESSOR] ✓ Mapped text "${word.text}" → "${fullParamName}" (X=${Math.round(wordX)})`);
+        }
+      } else {
+        // Log unmapped words for debugging
+        console.log(`[COMPRESSOR] ⚠ Unmapped word: "${word.text}" at X=${Math.round(wordX)}`);
+      }
+    });
+
+    // Only add rows with meaningful data (at least 5 parameters)
+    if (parametersFound >= 5) {
+      const timeValue = timeWord.text.trim();
+      const formattedTime = timeValue.includes(':') ? timeValue : `${timeValue}:00`;
+      
+      extractedRows.push({
+        id: `time-row-${rowIndex}`,
+        timeReading: formattedTime,
+        date: new Date().toISOString().split('T')[0],
+        parameters,
+        isVerified: false
+      });
+      
+      console.log(`[COMPRESSOR] ✅ Added row ${formattedTime} with ${parametersFound} parameters`);
+    } else {
+      console.warn(`[COMPRESSOR] ❌ Skipping row ${timeWord.text} - only found ${parametersFound} parameters (minimum 5 required)`);
+    }
+  });
+
+  console.log(`[COMPRESSOR] 🎯 Successfully extracted ${extractedRows.length} complete time-based readings`);
+  return extractedRows;
+};
+
+// Enhanced preprocessing specifically for gas compressor sheets
+const specializedCompressorPreprocessing = (canvas: HTMLCanvasElement): HTMLCanvasElement => {
+  const ctx = canvas.getContext('2d')!;
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imageData.data;
+
+  console.log(`[PREPROCESSING] Processing gas compressor sheet: ${canvas.width}x${canvas.height}`);
+
+  // Step 1: Advanced contrast enhancement for table data
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    
+    // Calculate luminance
+    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+    
+    // Aggressive bi-modal enhancement for table text vs background
+    let enhanced;
+    if (luminance < 140) {
+      // Make text much darker and crisper
+      enhanced = Math.max(0, (luminance - 40) * 0.4);
+    } else {
+      // Make background much lighter
+      enhanced = Math.min(255, luminance * 1.1 + 40);
+    }
+    
+    data[i] = enhanced;
+    data[i + 1] = enhanced;
+    data[i + 2] = enhanced;
+  }
+
+  // Step 2: Apply unsharp masking for crisp text
+  const sharpened = applyUnsharpMask(data, canvas.width, canvas.height);
+  
+  // Step 3: Final adaptive binarization
+  const binarized = adaptiveBinarization(sharpened, canvas.width, canvas.height);
+  
+  console.log(`[PREPROCESSING] Applied gas compressor specific enhancements`);
+  
+  const processedImageData = new ImageData(binarized, canvas.width, canvas.height);
+  ctx.putImageData(processedImageData, 0, 0);
+
+  return canvas;
+};
+
+// Unsharp masking for crisp text
+const applyUnsharpMask = (data: Uint8ClampedArray, width: number, height: number): Uint8ClampedArray => {
+  const result = new Uint8ClampedArray(data.length);
+  const amount = 1.5; // Sharpening amount
+  const radius = 1; // Sharpening radius
+
+  // Create Gaussian blur first
+  const blurred = gaussianBlur(data, width, height, radius);
+  
+  // Apply unsharp mask formula: original + amount * (original - blurred)
+  for (let i = 0; i < data.length; i += 4) {
+    const original = data[i];
+    const blur = blurred[i];
+    const sharpened = Math.max(0, Math.min(255, original + amount * (original - blur)));
+    
+    result[i] = sharpened;
+    result[i + 1] = sharpened;
+    result[i + 2] = sharpened;
+    result[i + 3] = data[i + 3];
+  }
+
+  return result;
+};
+
+// Gaussian blur implementation
+const gaussianBlur = (data: Uint8ClampedArray, width: number, height: number, radius: number): Uint8ClampedArray => {
+  const result = new Uint8ClampedArray(data.length);
+  const kernel = generateGaussianKernel(radius);
+  const kernelSize = kernel.length;
+  const offset = Math.floor(kernelSize / 2);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      let weightSum = 0;
+      
+      for (let ky = 0; ky < kernelSize; ky++) {
+        for (let kx = 0; kx < kernelSize; kx++) {
+          const ny = y + ky - offset;
+          const nx = x + kx - offset;
+          
+          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+            const idx = (ny * width + nx) * 4;
+            const weight = kernel[ky][kx];
+            sum += data[idx] * weight;
+            weightSum += weight;
+          }
+        }
+      }
+      
+      const idx = (y * width + x) * 4;
+      const blurred = sum / weightSum;
+      
+      result[idx] = blurred;
+      result[idx + 1] = blurred;
+      result[idx + 2] = blurred;
+      result[idx + 3] = data[idx + 3];
+    }
+  }
+
+  return result;
+};
+
+// Generate Gaussian kernel
+const generateGaussianKernel = (radius: number): number[][] => {
+  const size = 2 * radius + 1;
+  const kernel: number[][] = [];
+  const sigma = radius / 3;
+  let sum = 0;
+
+  for (let y = 0; y < size; y++) {
+    kernel[y] = [];
+    for (let x = 0; x < size; x++) {
+      const dx = x - radius;
+      const dy = y - radius;
+      const value = Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+      kernel[y][x] = value;
+      sum += value;
+    }
+  }
+
+  // Normalize kernel
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      kernel[y][x] /= sum;
+    }
+  }
+
+  return kernel;
+};
+
+// Adaptive binarization
+const adaptiveBinarization = (data: Uint8ClampedArray, width: number, height: number): Uint8ClampedArray => {
+  const result = new Uint8ClampedArray(data.length);
+  const windowSize = 15;
+  const c = 10; // Constant subtracted from mean
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      let count = 0;
+      
+      // Calculate local mean
+      for (let dy = -windowSize; dy <= windowSize; dy++) {
+        for (let dx = -windowSize; dx <= windowSize; dx++) {
+          const ny = y + dy;
+          const nx = x + dx;
+          
+          if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+            const idx = (ny * width + nx) * 4;
+            sum += data[idx];
+            count++;
+          }
+        }
+      }
+      
+      const mean = sum / count;
+      const threshold = mean - c;
+      
+      const idx = (y * width + x) * 4;
+      const value = data[idx] > threshold ? 255 : 0;
+      
+      result[idx] = value;
+      result[idx + 1] = value;
+      result[idx + 2] = value;
+      result[idx + 3] = data[idx + 3];
+    }
+  }
+
+  return result;
+};
+
+// Debug function for detailed OCR analysis
+const debugCompressorOCRResults = (ocrData: any) => {
+  console.log("=== GAS COMPRESSOR OCR DEBUG ===");
+  console.log("Raw text length:", ocrData.text?.length || 0);
+  console.log("Words detected:", ocrData.words?.length || 0);
+  
+  if (ocrData.words && ocrData.words.length > 0) {
+    console.log("\n📊 Word Distribution Analysis:");
+    const xPositions = ocrData.words.map((w: any) => (w.bbox.x0 + w.bbox.x1) / 2);
+    console.log(`X-coordinates range: ${Math.min(...xPositions).toFixed(0)} - ${Math.max(...xPositions).toFixed(0)}`);
+    
+    console.log("\n🕐 Time Pattern Words:");
+    const timeWords = ocrData.words.filter((w: any) => /^\d{1,2}[\.:]\d{2}/.test(w.text));
+    timeWords.forEach((word: any, i: number) => {
+      console.log(`  ${i + 1}. "${word.text}" at (${Math.round(word.bbox.x0)}, ${Math.round(word.bbox.y0)}) confidence: ${(word.confidence || 0).toFixed(2)}`);
+    });
+    
+    console.log("\n🔢 Sample Numeric Words:");
+    const numericWords = ocrData.words.filter((w: any) => /^\d+\.?\d*$/.test(w.text.trim())).slice(0, 10);
+    numericWords.forEach((word: any, i: number) => {
+      console.log(`  ${i + 1}. "${word.text}" at (${Math.round(word.bbox.x0)}, ${Math.round(word.bbox.y0)})`);
+    });
+    
+    console.log("\n📋 Sample Column Mapping:");
+    const sampleWords = ocrData.words.slice(0, 20);
+    sampleWords.forEach((word: any) => {
+      const wordX = (word.bbox.x0 + word.bbox.x1) / 2;
+      const matchedCol = GAS_COMPRESSOR_COLUMNS.find(col => 
+        Math.abs(wordX - col.expectedXPosition) <= col.tolerance
+      );
+      
+      if (matchedCol) {
+        console.log(`  "${word.text}" → ${matchedCol.mainHeader} - ${matchedCol.subHeader}`);
+      }
+    });
+  }
+  
+  console.log("\n📄 Raw text preview:", ocrData.text?.substring(0, 500));
+  console.log("===============================");
 };
 
 const EnhancedOilFieldOCR: React.FC = () => {
@@ -76,7 +478,7 @@ const EnhancedOilFieldOCR: React.FC = () => {
   const [processingStatus, setProcessingStatus] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [reportDate, setReportDate] = useState(new Date().toISOString().split('T')[0]);
-  const [fieldName, setFieldName] = useState('West Texas Field A');
+  const [fieldName, setFieldName] = useState('Gas Compressor Station A');
   const [showOriginalText, setShowOriginalText] = useState(false);
   const [processingProgress, setProcessingProgress] = useState(0);
   
@@ -85,7 +487,6 @@ const EnhancedOilFieldOCR: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
-    // Load PDF.js
     loadPDFJS();
     
     return () => {
@@ -95,7 +496,6 @@ const EnhancedOilFieldOCR: React.FC = () => {
     };
   }, []);
 
-  // Load PDF.js library
   const loadPDFJS = async () => {
     if (!window.pdfjsLib) {
       const script = document.createElement('script');
@@ -108,31 +508,38 @@ const EnhancedOilFieldOCR: React.FC = () => {
     }
   };
 
-  // Initialize enhanced Tesseract worker for table processing
+  // FIXED: Enhanced worker initialization with correct parameter types
   const initializeWorker = async () => {
     if (!workerRef.current) {
-      setProcessingStatus('Initializing enhanced OCR engine...');
+      setProcessingStatus('Initializing specialized OCR engine...');
       setProcessingProgress(10);
-      
+
       try {
         workerRef.current = await createWorker('eng', 1, {
           logger: m => {
             if (m.status === 'recognizing text') {
               const progress = Math.round(m.progress * 100);
               setProcessingProgress(30 + progress * 0.6);
-              setProcessingStatus(`Extracting text: ${progress}%`);
+              setProcessingStatus(`Extracting compressor data: ${progress}%`);
             }
           }
         });
-        
-        // Enhanced parameters for table recognition
+
+        // FIXED: Use proper enum values, not strings
         await workerRef.current.setParameters({
-          tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,°%/-():\n\t ',
-          tessedit_pageseg_mode: PSM.SPARSE_TEXT, // Better for tables
-          tessedit_ocr_engine_mode: '1', // LSTM engine
+          tessedit_pageseg_mode: PSM.SINGLE_BLOCK, // Use enum directly, not string
+          tessedit_ocr_engine_mode: OEM.LSTM_ONLY, // Use enum directly, not string
+          preserve_interword_spaces: '1',
+          tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,°%/-(): \n\t✓×',
+          user_defined_dpi: '300',
+          classify_bln_numeric_mode: '1',
+          // Additional table-specific parameters
+          textord_tablefind_good_width: '5',
+          textord_tabfind_find_tables: '1'
         });
-        
+
         setProcessingProgress(25);
+        console.log('✅ OCR worker initialized with gas compressor parameters');
       } catch (error) {
         console.error('Failed to initialize OCR worker:', error);
         throw new Error('Failed to initialize OCR engine');
@@ -140,7 +547,149 @@ const EnhancedOilFieldOCR: React.FC = () => {
     }
   };
 
-  // Convert PDF to images
+  // ENHANCED: Image preprocessing
+  const preprocessImage = (source: File | HTMLCanvasElement): Promise<File> => {
+    return new Promise((resolve) => {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d')!;
+      
+      if (source instanceof File) {
+        const img = new Image();
+        img.onload = () => {
+          // Higher scale for better OCR on complex tables
+          const scale = Math.max(3, 3500 / Math.max(img.width, img.height));
+          canvas.width = img.width * scale;
+          canvas.height = img.height * scale;
+          
+          console.log(`[PREPROCESSING] Scaling image by ${scale.toFixed(2)}x to ${canvas.width}x${canvas.height}`);
+          
+          ctx.imageSmoothingEnabled = false; // Preserve sharp edges
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          
+          const processedCanvas = specializedCompressorPreprocessing(canvas);
+          
+          processedCanvas.toBlob((blob) => {
+            if (blob) {
+              const processedFile = new File([blob], source.name, { type: 'image/png' });
+              resolve(processedFile);
+            }
+          }, 'image/png', 1.0); // Maximum quality
+        };
+        img.src = URL.createObjectURL(source);
+      } else {
+        canvas.width = source.width;
+        canvas.height = source.height;
+        ctx.drawImage(source, 0, 0);
+        
+        const processedCanvas = specializedCompressorPreprocessing(canvas);
+        
+        processedCanvas.toBlob((blob) => {
+          if (blob) {
+            const processedFile = new File([blob], 'processed-compressor-sheet.png', { type: 'image/png' });
+            resolve(processedFile);
+          }
+        }, 'image/png', 1.0);
+      }
+    });
+  };
+
+  // ENHANCED: Table parsing with specialized gas compressor logic
+  const parseTableData = async (ocrData: OCRData): Promise<ExtractedTable> => {
+    console.log("[COMPRESSOR] Starting specialized gas compressor data parsing...");
+    
+    debugCompressorOCRResults(ocrData);
+    
+    if (ocrData.words && ocrData.words.length > 0) {
+      try {
+        console.log("[COMPRESSOR] Attempting specialized gas compressor extraction...");
+        const compressorResults = specializedGasCompressorExtraction(ocrData);
+        
+        if (compressorResults.length > 0) {
+          console.log(`[COMPRESSOR] 🎯 Specialized extraction successful: ${compressorResults.length} time readings extracted`);
+          
+          // Generate proper hierarchical headers
+          const headers = ['Time (hrs)', ...GAS_COMPRESSOR_COLUMNS.slice(1).map(col => 
+            `${col.mainHeader} - ${col.subHeader} (${col.unit})`
+          )];
+          
+          return {
+            headers,
+            rows: [],
+            wellData: compressorResults // Using wellData interface for compatibility
+          };
+        } else {
+          console.warn("[COMPRESSOR] ❌ Specialized extraction returned no results");
+        }
+      } catch (err) {
+        console.error("Specialized gas compressor extraction failed:", err);
+      }
+    }
+    
+    console.log("[COMPRESSOR] Using enhanced fallback parsing...");
+    return enhancedFallbackParsing(ocrData, reportDate);
+  };
+
+  // Enhanced fallback for when specialized extraction fails
+  const enhancedFallbackParsing = (ocrData: any, reportDate: string): ExtractedTable => {
+    const lines = (ocrData.text || '').split('\n').filter((line: string) => line.trim());
+    const wellData: CompressorDataPoint[] = [];
+    
+    console.log(`[FALLBACK] Processing ${lines.length} text lines for fallback extraction`);
+    
+    lines.forEach((line: string, idx: number) => {
+      const trimmedLine = line.trim();
+      if (trimmedLine.length < 5) return;
+      
+      // Look for time patterns or lines with multiple numbers
+      const timeMatch = trimmedLine.match(/(\d{1,2}[\.:]\d{2})/);
+      const numbers = trimmedLine.match(/\d+\.?\d*/g) || [];
+      
+      if ((timeMatch && numbers.length >= 3) || numbers.length >= 8) {
+        const timeIdentifier = timeMatch ? timeMatch[1] : `Row-${idx + 1}`;
+        const parameters: CompressorDataPoint['parameters'] = {};
+        
+        // Skip time value when extracting parameters
+        const dataNumbers = timeMatch ? numbers.slice(1) : numbers;
+        
+        dataNumbers.forEach((num, i) => {
+          const value = parseFloat(num);
+          if (!isNaN(value) && value >= 0) {
+            const column = GAS_COMPRESSOR_COLUMNS[i + 1]; // Skip time column
+            const paramName = column ? 
+              `${column.mainHeader} - ${column.subHeader}` : 
+              `Parameter ${i + 1}`;
+            
+            parameters[paramName] = {
+              value: value.toString(),
+              unit: column?.unit || '',
+              confidence: 0.6, // Lower confidence for fallback
+              cellPosition: { row: idx, col: i },
+              isEditing: false
+            };
+          }
+        });
+        
+        if (Object.keys(parameters).length >= 3) {
+          wellData.push({
+            id: `fallback-${idx}`,
+            timeReading: timeIdentifier,
+            date: reportDate,
+            parameters,
+            isVerified: false
+          });
+        }
+      }
+    });
+    
+    console.log(`[FALLBACK] Extracted ${wellData.length} readings using fallback method`);
+    return {
+      headers: ['Time', 'Gas Compressor Parameters'],
+      rows: [],
+      wellData
+    };
+  };
+
+  // Rest of the component code (file handling, UI, etc.) remains the same...
   const convertPDFToImages = async (file: File): Promise<PDFPageInfo[]> => {
     return new Promise(async (resolve, reject) => {
       try {
@@ -157,11 +706,11 @@ const EnhancedOilFieldOCR: React.FC = () => {
         setProcessingStatus(`Converting PDF pages (${pdf.numPages} pages)...`);
         const pages: PDFPageInfo[] = [];
 
-        for (let pageNum = 1; pageNum <= Math.min(pdf.numPages, 10); pageNum++) { // Limit to 10 pages
+        for (let pageNum = 1; pageNum <= Math.min(pdf.numPages, 10); pageNum++) {
           setProcessingProgress(15 + (pageNum / pdf.numPages) * 10);
           
           const page = await pdf.getPage(pageNum);
-          const viewport = page.getViewport({ scale: 2.0 }); // High resolution for better OCR
+          const viewport = page.getViewport({ scale: 2.0 });
           
           const canvas = document.createElement('canvas');
           const context = canvas.getContext('2d')!;
@@ -188,237 +737,6 @@ const EnhancedOilFieldOCR: React.FC = () => {
     });
   };
 
-  // Enhanced image preprocessing for better OCR results
-  const preprocessImage = (source: File | HTMLCanvasElement): Promise<File> => {
-    return new Promise((resolve) => {
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d')!;
-      
-      if (source instanceof File) {
-        // Handle regular image file
-        const img = new Image();
-        img.onload = () => {
-          processImageOnCanvas(img, canvas, ctx, source.name, resolve);
-        };
-        img.src = URL.createObjectURL(source);
-      } else {
-        // Handle canvas from PDF
-        processCanvasOnCanvas(source, canvas, ctx, resolve);
-      }
-    });
-  };
-
-  const processImageOnCanvas = (img: HTMLImageElement, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, fileName: string, resolve: (file: File) => void) => {
-    // Scale up the image for better OCR
-    const scale = Math.min(2000 / img.width, 2000 / img.height, 2);
-    canvas.width = img.width * scale;
-    canvas.height = img.height * scale;
-    
-    // Draw with enhanced contrast and sharpening
-    ctx.filter = 'contrast(150%) brightness(110%)';
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    
-    // Convert back to file
-    canvas.toBlob((blob) => {
-      if (blob) {
-        const processedFile = new File([blob], fileName, { type: 'image/png' });
-        resolve(processedFile);
-      }
-    }, 'image/png', 0.95);
-  };
-
-  const processCanvasOnCanvas = (sourceCanvas: HTMLCanvasElement, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, resolve: (file: File) => void) => {
-    canvas.width = sourceCanvas.width;
-    canvas.height = sourceCanvas.height;
-    
-    // Apply image enhancements
-    ctx.filter = 'contrast(150%) brightness(110%)';
-    ctx.drawImage(sourceCanvas, 0, 0);
-    
-    // Convert to file
-    canvas.toBlob((blob) => {
-      if (blob) {
-        const processedFile = new File([blob], 'pdf-page.png', { type: 'image/png' });
-        resolve(processedFile);
-      }
-    }, 'image/png', 0.95);
-  };
-
-  // Parse tabular data from OCR results
-  const parseTableData = async (ocrData: any): Promise<ExtractedTable> => {
-    setProcessingStatus('Analyzing table structure...');
-    setProcessingProgress(95);
-    
-    const words = ocrData.words || [];
-    
-    // Group words by approximate rows and columns
-    const rows: any[][] = [];
-    const rowTolerance = 20; // pixels
-    
-    // Sort words by vertical position
-    const sortedWords = words.sort((a: any, b: any) => a.bbox.y0 - b.bbox.y0);
-    
-    let currentRow: any[] = [];
-    let lastY = -1;
-    
-    sortedWords.forEach((word: any) => {
-      if (lastY === -1 || Math.abs(word.bbox.y0 - lastY) < rowTolerance) {
-        currentRow.push(word);
-        lastY = word.bbox.y0;
-      } else {
-        if (currentRow.length > 0) {
-          // Sort current row by x position
-          currentRow.sort((a, b) => a.bbox.x0 - b.bbox.x0);
-          rows.push([...currentRow]);
-        }
-        currentRow = [word];
-        lastY = word.bbox.y0;
-      }
-    });
-    
-    if (currentRow.length > 0) {
-      currentRow.sort((a, b) => a.bbox.x0 - b.bbox.x0);
-      rows.push(currentRow);
-    }
-
-    // Extract headers and data
-    const headers: string[] = [];
-    const dataRows: TableCell[][] = [];
-    
-    if (rows.length > 0) {
-      const headerRow = rows[0];
-      headerRow.forEach((word: any, index: number) => {
-        headers[index] = word.text || `Column ${index + 1}`;
-      });
-    }
-
-    // Convert remaining rows to table cells
-    rows.slice(1).forEach((row, rowIndex) => {
-      const tableCells: TableCell[] = [];
-      row.forEach((word: any, colIndex: number) => {
-        tableCells.push({
-          text: word.text || '',
-          confidence: word.confidence / 100 || 0,
-          position: {
-            x: word.bbox.x0,
-            y: word.bbox.y0,
-            width: word.bbox.x1 - word.bbox.x0,
-            height: word.bbox.y1 - word.bbox.y0
-          },
-          row: rowIndex,
-          col: colIndex
-        });
-      });
-      dataRows.push(tableCells);
-    });
-
-    // Convert to well data format
-    const wellData = parseWellDataFromTable(dataRows, headers);
-    
-    return {
-      headers,
-      rows: dataRows,
-      wellData
-    };
-  };
-
-  // Parse well data from table structure
-  const parseWellDataFromTable = (rows: TableCell[][], headers: string[]): WellDataPoint[] => {
-    const wellData: WellDataPoint[] = [];
-    
-    rows.forEach((row, rowIndex) => {
-      if (row.length === 0) return;
-      
-      const wellName = row[0]?.text || `Well-${rowIndex + 1}`;
-      if (!wellName || wellName.length < 2) return;
-      
-      const parameters: WellDataPoint['parameters'] = {};
-      
-      row.forEach((cell, colIndex) => {
-        if (colIndex === 0) return; // Skip well name column
-        
-        const headerName = headers[colIndex] || `Parameter ${colIndex}`;
-        const parameterKey = normalizeParameterName(headerName);
-        
-        const { value, unit } = extractValueAndUnit(cell.text);
-        
-        if (value) {
-          parameters[parameterKey] = {
-            value,
-            unit: unit || detectUnit(parameterKey),
-            confidence: cell.confidence,
-            cellPosition: { row: rowIndex, col: colIndex },
-            isEditing: false
-          };
-        }
-      });
-      
-      if (Object.keys(parameters).length > 0) {
-        wellData.push({
-          id: `well-${rowIndex}`,
-          wellName: cleanWellName(wellName),
-          date: reportDate,
-          parameters,
-          isVerified: false
-        });
-      }
-    });
-    
-    return wellData;
-  };
-
-  // Helper functions
-  const normalizeParameterName = (header: string): string => {
-    const cleaned = header.toLowerCase().replace(/[^a-z0-9\s]/g, '');
-    
-    for (const [key, mapping] of Object.entries(PARAMETER_MAPPING)) {
-      if (cleaned.includes(key)) {
-        return mapping.fullName;
-      }
-    }
-    
-    return header.trim();
-  };
-
-  const extractValueAndUnit = (text: string): { value: string; unit: string } => {
-    if (!text) return { value: '', unit: '' };
-    
-    const patterns = [
-      /(\d+\.?\d*)\s*([A-Za-z°%\/]+)/,  // Number followed by unit
-      /(\d+\.?\d*)/,                    // Just number
-      /(\d{1,3}(?:,\d{3})*\.?\d*)/      // Number with commas
-    ];
-    
-    for (const pattern of patterns) {
-      const match = text.match(pattern);
-      if (match) {
-        return {
-          value: match[1].replace(/,/g, ''),
-          unit: match[2] || ''
-        };
-      }
-    }
-    
-    return { value: text.trim(), unit: '' };
-  };
-
-  const detectUnit = (parameterName: string): string => {
-    const param = parameterName.toLowerCase();
-    
-    for (const [key, mapping] of Object.entries(PARAMETER_MAPPING)) {
-      if (param.includes(key)) {
-        return mapping.units[0];
-      }
-    }
-    
-    return '';
-  };
-
-  const cleanWellName = (name: string): string => {
-    return name.replace(/[^a-zA-Z0-9\-]/g, '').trim() || 'Unknown Well';
-  };
-
-  // Main file processing function
   const processFile = async (file: File) => {
     try {
       setIsProcessing(true);
@@ -443,13 +761,11 @@ const EnhancedOilFieldOCR: React.FC = () => {
     }
   };
 
-  // Process PDF file
   const processPDFFile = async (file: File) => {
     try {
       setProcessingStatus('Processing PDF document...');
       setProcessingProgress(5);
 
-      // Convert PDF to images
       const pages = await convertPDFToImages(file);
       setPdfPages(pages);
       
@@ -457,12 +773,10 @@ const EnhancedOilFieldOCR: React.FC = () => {
         throw new Error('No pages found in PDF');
       }
 
-      // Set the first page as preview
       const firstPageCanvas = pages[0].canvas;
       const imageUrl = firstPageCanvas.toDataURL('image/png');
       setUploadedImage(imageUrl);
 
-      // Process the first page automatically
       await processOCROnCanvas(firstPageCanvas);
       
     } catch (error) {
@@ -470,17 +784,15 @@ const EnhancedOilFieldOCR: React.FC = () => {
     }
   };
 
-  // Process regular image file
   const processImageFile = async (file: File) => {
     try {
-      setProcessingStatus('Processing image file...');
+      setProcessingStatus('Processing gas compressor sheet...');
       setProcessingProgress(5);
 
       const imageUrl = URL.createObjectURL(file);
       setUploadedImage(imageUrl);
 
-      // Preprocess and run OCR
-      setProcessingStatus('Enhancing image quality...');
+      setProcessingStatus('Applying specialized preprocessing...');
       setProcessingProgress(10);
       const processedFile = await preprocessImage(file);
 
@@ -491,43 +803,34 @@ const EnhancedOilFieldOCR: React.FC = () => {
     }
   };
 
-  // Run OCR on canvas (for PDF pages)
   const processOCROnCanvas = async (canvas: HTMLCanvasElement) => {
     await initializeWorker();
-    setProcessingStatus('Extracting text from table...');
+    setProcessingStatus('Extracting gas compressor data...');
     setProcessingProgress(30);
-    
+
     const { data } = await workerRef.current!.recognize(canvas);
-    
-    if (!data || !data.text) {
-      throw new Error('No text was extracted from the document');
-    }
-    
-    const tableData = await parseTableData(data);
+    const ocrData = data as OCRData;
+
+    const tableData = await parseTableData(ocrData);
     setExtractedTable(tableData);
     setProcessingProgress(100);
-    setProcessingStatus('Processing complete!');
+    setProcessingStatus('Gas compressor data extraction complete!');
   };
 
-  // Run OCR on file (for images)
   const runOCROnFile = async (file: File) => {
     await initializeWorker();
-    setProcessingStatus('Extracting text from table...');
+    setProcessingStatus('Extracting gas compressor data...');
     setProcessingProgress(30);
-    
+
     const { data } = await workerRef.current!.recognize(file);
-    
-    if (!data || !data.text) {
-      throw new Error('No text was extracted from the image');
-    }
-    
-    const tableData = await parseTableData(data);
+    const ocrData = data as OCRData;
+
+    const tableData = await parseTableData(ocrData);
     setExtractedTable(tableData);
     setProcessingProgress(100);
-    setProcessingStatus('Processing complete!');
+    setProcessingStatus('Gas compressor data extraction complete!');
   };
 
-  // Handle PDF page selection
   const selectPDFPage = async (pageIndex: number) => {
     if (!pdfPages[pageIndex]) return;
     
@@ -551,7 +854,6 @@ const EnhancedOilFieldOCR: React.FC = () => {
     }
   };
 
-  // Handle file upload
   const handleFileUpload = (file: File) => {
     const isPDF = file.type === 'application/pdf';
     const isImage = file.type.startsWith('image/');
@@ -569,7 +871,6 @@ const EnhancedOilFieldOCR: React.FC = () => {
     processFile(file);
   };
 
-  // Drag and drop handlers
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(true);
@@ -590,74 +891,72 @@ const EnhancedOilFieldOCR: React.FC = () => {
     }
   }, []);
 
-  // Edit well data functions (same as before)
-  const toggleEdit = (wellId: string, parameterKey: string) => {
+  const toggleEdit = (readingId: string, parameterKey: string) => {
     setExtractedTable(prev => {
       if (!prev) return prev;
       
       return {
         ...prev,
-        wellData: prev.wellData.map(well => 
-          well.id === wellId 
+        wellData: prev.wellData.map(reading => 
+          reading.id === readingId 
             ? {
-                ...well,
+                ...reading,
                 parameters: {
-                  ...well.parameters,
+                  ...reading.parameters,
                   [parameterKey]: {
-                    ...well.parameters[parameterKey],
-                    isEditing: !well.parameters[parameterKey].isEditing
+                    ...reading.parameters[parameterKey],
+                    isEditing: !reading.parameters[parameterKey].isEditing
                   }
                 }
               }
-            : well
+            : reading
         )
       };
     });
   };
 
-  const updateParameter = (wellId: string, parameterKey: string, field: 'value' | 'unit', newValue: string) => {
+  const updateParameter = (readingId: string, parameterKey: string, field: 'value' | 'unit', newValue: string) => {
     setExtractedTable(prev => {
       if (!prev) return prev;
       
       return {
         ...prev,
-        wellData: prev.wellData.map(well => 
-          well.id === wellId 
+        wellData: prev.wellData.map(reading => 
+          reading.id === readingId 
             ? {
-                ...well,
+                ...reading,
                 parameters: {
-                  ...well.parameters,
+                  ...reading.parameters,
                   [parameterKey]: {
-                    ...well.parameters[parameterKey],
+                    ...reading.parameters[parameterKey],
                     [field]: newValue
                   }
                 }
               }
-            : well
+            : reading
         )
       };
     });
   };
 
-  const removeParameter = (wellId: string, parameterKey: string) => {
+  const removeParameter = (readingId: string, parameterKey: string) => {
     setExtractedTable(prev => {
       if (!prev) return prev;
       
       return {
         ...prev,
-        wellData: prev.wellData.map(well => {
-          if (well.id === wellId) {
-            const newParameters = { ...well.parameters };
+        wellData: prev.wellData.map(reading => {
+          if (reading.id === readingId) {
+            const newParameters = { ...reading.parameters };
             delete newParameters[parameterKey];
-            return { ...well, parameters: newParameters };
+            return { ...reading, parameters: newParameters };
           }
-          return well;
+          return reading;
         })
       };
     });
   };
 
-  // Send enhanced data to backend (same as before but with file type info)
   const sendToBackend = async () => {
     try {
       const token = localStorage.getItem('token');
@@ -674,11 +973,11 @@ const EnhancedOilFieldOCR: React.FC = () => {
 
       setProcessingStatus('Saving to database...');
 
-      const enhancedData = extractedTable.wellData.map(well => ({
-        well_name: well.wellName,
-        date: well.date,
+      const enhancedData = extractedTable.wellData.map(reading => ({
+        time_reading: reading.timeReading || reading.wellName, // Handle both interfaces
+        date: reading.date,
         field_name: fieldName,
-        parameters: Object.entries(well.parameters).map(([paramName, paramData]) => ({
+        parameters: Object.entries(reading.parameters).map(([paramName, paramData]) => ({
           parameter_name: paramName,
           parameter_value: parseFloat(paramData.value) || 0,
           value_text: paramData.value,
@@ -688,9 +987,9 @@ const EnhancedOilFieldOCR: React.FC = () => {
           is_verified: false
         })),
         extraction_metadata: {
-          total_parameters: Object.keys(well.parameters).length,
-          avg_confidence: Object.values(well.parameters).reduce((sum, p) => sum + p.confidence, 0) / Object.keys(well.parameters).length,
-          extraction_method: `Enhanced OCR with Table Recognition (${fileType?.toUpperCase()})`,
+          total_parameters: Object.keys(reading.parameters).length,
+          avg_confidence: Object.values(reading.parameters).reduce((sum, p) => sum + p.confidence, 0) / Object.keys(reading.parameters).length,
+          extraction_method: `Specialized Gas Compressor OCR (${fileType?.toUpperCase()})`,
           source_file_type: fileType,
           pdf_page: fileType === 'pdf' ? selectedPage + 1 : null
         }
@@ -705,11 +1004,11 @@ const EnhancedOilFieldOCR: React.FC = () => {
         body: JSON.stringify({
           extractedData: enhancedData,
           uploadedAt: new Date().toISOString(),
-          processingMethod: `Enhanced OCR (${fileType?.toUpperCase()})`,
+          processingMethod: `Specialized Gas Compressor OCR (${fileType?.toUpperCase()})`,
           reportDate,
           fieldName,
-          totalWells: extractedTable.wellData.length,
-          totalParameters: enhancedData.reduce((sum, well) => sum + well.parameters.length, 0),
+          totalReadings: extractedTable.wellData.length,
+          totalParameters: enhancedData.reduce((sum, reading) => sum + reading.parameters.length, 0),
           sourceFileType: fileType,
           pdfPageNumber: fileType === 'pdf' ? selectedPage + 1 : null
         })
@@ -718,9 +1017,8 @@ const EnhancedOilFieldOCR: React.FC = () => {
       if (response.ok) {
         const result = await response.json();
         setError(null);
-        alert(`✅ Successfully saved ${enhancedData.length} wells with ${enhancedData.reduce((sum, well) => sum + well.parameters.length, 0)} parameters!`);
+        alert(`✅ Successfully saved ${enhancedData.length} time readings with ${enhancedData.reduce((sum, reading) => sum + reading.parameters.length, 0)} parameters!`);
         
-        // Reset form
         setTimeout(() => {
           setExtractedTable(null);
           setUploadedImage(null);
@@ -740,25 +1038,28 @@ const EnhancedOilFieldOCR: React.FC = () => {
     }
   };
 
-  // Export data as CSV (same as before)
   const exportToCSV = () => {
     if (!extractedTable) return;
     
     const csvData = [];
+    
+    // Create proper hierarchical headers
+    const hierarchicalHeaders = ['Time (hrs)'];
     const allParameters = new Set<string>();
     
-    extractedTable.wellData.forEach(well => {
-      Object.keys(well.parameters).forEach(param => allParameters.add(param));
+    extractedTable.wellData.forEach(reading => {
+      Object.keys(reading.parameters).forEach(param => allParameters.add(param));
     });
     
-    const headers = ['Well Name', 'Date', ...Array.from(allParameters)];
-    csvData.push(headers.join(','));
+    hierarchicalHeaders.push(...Array.from(allParameters));
+    csvData.push(hierarchicalHeaders.join(','));
     
-    extractedTable.wellData.forEach(well => {
-      const row = [well.wellName, well.date];
+    // Add data rows
+    extractedTable.wellData.forEach(reading => {
+      const row = [reading.timeReading || reading.wellName];
       allParameters.forEach(param => {
-        const paramData = well.parameters[param];
-        row.push(paramData ? `${paramData.value} ${paramData.unit}`.trim() : '');
+        const paramData = reading.parameters[param];
+        row.push(paramData ? `${paramData.value}${paramData.unit ? ' ' + paramData.unit : ''}` : '');
       });
       csvData.push(row.join(','));
     });
@@ -767,7 +1068,7 @@ const EnhancedOilFieldOCR: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `oil_field_data_${reportDate}_${fileType}.csv`;
+    a.download = `gas_compressor_data_${reportDate}_${fileType}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -781,10 +1082,10 @@ const EnhancedOilFieldOCR: React.FC = () => {
             <Grid className="h-10 w-10 mr-4" />
             <div>
               <h2 className="text-3xl font-bold">
-                Enhanced OCR Processor
+                Gas Compressor OCR Processor
               </h2>
               <p className="mt-1 opacity-90">
-                Advanced extraction for images and PDF production sheets
+                Specialized extraction for gas compressor monitoring sheets
               </p>
             </div>
           </div>
@@ -815,7 +1116,7 @@ const EnhancedOilFieldOCR: React.FC = () => {
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Field Name
+              Compressor Station
             </label>
             <select
               value={fieldName}
@@ -823,11 +1124,11 @@ const EnhancedOilFieldOCR: React.FC = () => {
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               disabled={isProcessing}
             >
-              <option>West Texas Field A</option>
-              <option>North Dakota Field B</option>
-              <option>Oklahoma Field C</option>
-              <option>Eagle Ford Shale</option>
-              <option>Permian Basin</option>
+              <option>Gas Compressor Station A</option>
+              <option>Gas Compressor Station B</option>
+              <option>Gas Compressor Station C</option>
+              <option>Natural Gas Processing Unit 1</option>
+              <option>Natural Gas Processing Unit 2</option>
             </select>
           </div>
         </div>
@@ -861,14 +1162,14 @@ const EnhancedOilFieldOCR: React.FC = () => {
             isProcessing ? 'text-gray-400' : 'text-gray-700'
           }`}>
             {isDragging 
-              ? 'Drop your file here' 
+              ? 'Drop your compressor sheet here' 
               : isProcessing 
-              ? 'Processing file...' 
-              : 'Upload Production Sheet'
+              ? 'Processing compressor data...' 
+              : 'Upload Gas Compressor Sheet'
             }
           </p>
           <p className="text-gray-500 mb-4">
-            📊 Images (JPG, PNG, GIF) or 📄 PDF documents with tabular data
+            📊 Gas compressor monitoring sheets (Images or PDF)
           </p>
           
           {isProcessing && (
@@ -958,7 +1259,7 @@ const EnhancedOilFieldOCR: React.FC = () => {
         </div>
       )}
 
-      {/* Results Display - Same as before but with file type info */}
+      {/* Results Display */}
       {extractedTable && uploadedImage && (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
           {/* Image/PDF Preview */}
@@ -979,18 +1280,18 @@ const EnhancedOilFieldOCR: React.FC = () => {
             <div className="relative">
               <img
                 src={uploadedImage}
-                alt={fileType === 'pdf' ? 'PDF page' : 'Production sheet'}
+                alt={fileType === 'pdf' ? 'PDF page' : 'Gas compressor sheet'}
                 className="w-full h-auto rounded-lg border shadow-sm"
               />
             </div>
           </div>
 
-          {/* Extracted Table Data - Same as before */}
+          {/* Extracted Compressor Data */}
           <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-100">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-xl font-semibold text-gray-900 flex items-center">
                 <Zap className="h-5 w-5 mr-2" />
-                Extracted Wells Data ({extractedTable.wellData.length} wells)
+                Gas Compressor Readings ({extractedTable.wellData.length} time points)
               </h3>
               <div className="flex space-x-2">
                 <button
@@ -1018,22 +1319,24 @@ const EnhancedOilFieldOCR: React.FC = () => {
             </div>
 
             <div className="max-h-96 overflow-y-auto space-y-4">
-              {extractedTable.wellData.map((well) => (
-                <div key={well.id} className="border rounded-lg p-4 hover:shadow-sm transition-shadow">
+              {extractedTable.wellData.map((reading) => (
+                <div key={reading.id} className="border rounded-lg p-4 hover:shadow-sm transition-shadow">
                   <div className="flex items-center justify-between mb-3">
-                    <h4 className="font-bold text-lg text-blue-600">{well.wellName}</h4>
-                    <span className="text-sm text-gray-500">{well.date}</span>
+                    <h4 className="font-bold text-lg text-blue-600">
+                      Time: {reading.timeReading || reading.wellName}
+                    </h4>
+                    <span className="text-sm text-gray-500">{reading.date}</span>
                   </div>
                   
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {Object.entries(well.parameters).map(([paramName, paramData]) => (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {Object.entries(reading.parameters).map(([paramName, paramData]) => (
                       <div key={paramName} className="border rounded-lg p-3 bg-gray-50">
                         <div className="flex items-center justify-between mb-2">
-                          <span className="text-sm font-medium text-gray-700">
+                          <span className="text-xs font-medium text-gray-700 leading-tight">
                             {paramName}
                           </span>
                           <div className="flex items-center space-x-1">
-                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                            <span className={`px-1 py-0.5 rounded text-xs font-medium ${
                               paramData.confidence > 0.8 
                                 ? 'bg-green-100 text-green-800'
                                 : paramData.confidence > 0.6
@@ -1043,13 +1346,13 @@ const EnhancedOilFieldOCR: React.FC = () => {
                               {Math.round(paramData.confidence * 100)}%
                             </span>
                             <button
-                              onClick={() => toggleEdit(well.id, paramName)}
+                              onClick={() => toggleEdit(reading.id, paramName)}
                               className="p-1 text-gray-500 hover:text-blue-600 transition-colors"
                             >
                               <Edit2 className="h-3 w-3" />
                             </button>
                             <button
-                              onClick={() => removeParameter(well.id, paramName)}
+                              onClick={() => removeParameter(reading.id, paramName)}
                               className="p-1 text-gray-500 hover:text-red-600 transition-colors"
                             >
                               <X className="h-3 w-3" />
@@ -1058,26 +1361,26 @@ const EnhancedOilFieldOCR: React.FC = () => {
                         </div>
 
                         {paramData.isEditing ? (
-                          <div className="grid grid-cols-2 gap-2">
+                          <div className="grid grid-cols-2 gap-1">
                             <input
                               type="text"
                               value={paramData.value}
-                              onChange={(e) => updateParameter(well.id, paramName, 'value', e.target.value)}
+                              onChange={(e) => updateParameter(reading.id, paramName, 'value', e.target.value)}
                               className="border rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                               placeholder="Value"
                             />
                             <input
                               type="text"
                               value={paramData.unit}
-                              onChange={(e) => updateParameter(well.id, paramName, 'unit', e.target.value)}
+                              onChange={(e) => updateParameter(reading.id, paramName, 'unit', e.target.value)}
                               className="border rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                               placeholder="Unit"
                             />
                           </div>
                         ) : (
-                          <div className="text-lg font-mono">
+                          <div className="text-base font-mono">
                             <span className="text-blue-600 font-bold">{paramData.value}</span>
-                            <span className="text-gray-600 ml-2">{paramData.unit}</span>
+                            <span className="text-gray-600 ml-1 text-sm">{paramData.unit}</span>
                           </div>
                         )}
                       </div>
@@ -1089,20 +1392,59 @@ const EnhancedOilFieldOCR: React.FC = () => {
               {extractedTable.wellData.length === 0 && (
                 <div className="text-center text-gray-500 py-12">
                   <Grid className="h-16 w-16 mx-auto mb-4 text-gray-300" />
-                  <p className="text-lg">No table data detected</p>
-                  <p className="text-sm">Try uploading a clearer file with tabular production data.</p>
+                  <p className="text-lg">No compressor data detected</p>
+                  <p className="text-sm">Ensure the image contains a gas compressor monitoring table with time-based readings.</p>
                 </div>
               )}
             </div>
+
+            {/* Enhanced Debug Section */}
+            {extractedTable && (
+              <div className="mt-4 pt-4 border-t">
+                <div className="flex space-x-2">
+                  <button 
+                    onClick={() => {
+                      console.log('=== COMPRESSOR EXTRACTION DEBUG ===');
+                      console.log('📊 Extracted Table:', extractedTable);
+                      console.log('🕐 Time Readings:', extractedTable.wellData.map(r => r.timeReading || r.wellName));
+                      console.log('📈 Total Parameters:', extractedTable.wellData.reduce((sum, r) => sum + Object.keys(r.parameters).length, 0));
+                      console.log('🎯 Column Coverage:');
+                      GAS_COMPRESSOR_COLUMNS.forEach(col => {
+                        const hasData = extractedTable.wellData.some(r => r.parameters[`${col.mainHeader} - ${col.subHeader}`]);
+                        console.log(`  ${hasData ? '✅' : '❌'} ${col.mainHeader} - ${col.subHeader}`);
+                      });
+                      console.log('=====================================');
+                    }}
+                    className="bg-purple-600 text-white px-3 py-2 rounded text-sm hover:bg-purple-700"
+                  >
+                    Debug Results
+                  </button>
+                  <button 
+                    onClick={() => {
+                      if (extractedTable.wellData.length > 0) {
+                        const sampleReading = extractedTable.wellData[0];
+                        console.log('=== SAMPLE DATA STRUCTURE ===');
+                        console.log('Sample reading:', sampleReading);
+                        console.log('Parameters:', Object.keys(sampleReading.parameters));
+                        console.log('=============================');
+                      }
+                    }}
+                    className="bg-indigo-600 text-white px-3 py-2 rounded text-sm hover:bg-indigo-700"
+                  >
+                    View Sample
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* Summary Statistics - Enhanced with file type info */}
+      {/* Summary Statistics */}
       {extractedTable && extractedTable.wellData.length > 0 && (
         <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-100">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">
-            Extraction Summary
+            Gas Compressor Data Summary
             {fileType && (
               <span className="ml-3 text-sm font-normal text-gray-600">
                 • Source: {fileType.toUpperCase()}
@@ -1115,18 +1457,18 @@ const EnhancedOilFieldOCR: React.FC = () => {
               <div className="text-2xl font-bold text-blue-600">
                 {extractedTable.wellData.length}
               </div>
-              <div className="text-sm text-gray-600">Wells Processed</div>
+              <div className="text-sm text-gray-600">Time Readings</div>
             </div>
             <div className="text-center p-4 bg-green-50 rounded-lg">
               <div className="text-2xl font-bold text-green-600">
-                {extractedTable.wellData.reduce((sum, well) => sum + Object.keys(well.parameters).length, 0)}
+                {extractedTable.wellData.reduce((sum, reading) => sum + Object.keys(reading.parameters).length, 0)}
               </div>
               <div className="text-sm text-gray-600">Total Parameters</div>
             </div>
             <div className="text-center p-4 bg-yellow-50 rounded-lg">
               <div className="text-2xl font-bold text-yellow-600">
-                {Math.round(extractedTable.wellData.reduce((sum, well) => {
-                  const avgConfidence = Object.values(well.parameters).reduce((s, p) => s + p.confidence, 0) / Object.keys(well.parameters).length;
+                {Math.round(extractedTable.wellData.reduce((sum, reading) => {
+                  const avgConfidence = Object.values(reading.parameters).reduce((s, p) => s + p.confidence, 0) / Object.keys(reading.parameters).length;
                   return sum + avgConfidence;
                 }, 0) / extractedTable.wellData.length * 100)}%
               </div>
@@ -1134,11 +1476,26 @@ const EnhancedOilFieldOCR: React.FC = () => {
             </div>
             <div className="text-center p-4 bg-purple-50 rounded-lg">
               <div className="text-2xl font-bold text-purple-600">
-                {extractedTable.wellData.reduce((sum, well) => {
-                  return sum + Object.values(well.parameters).filter(p => p.confidence > 0.8).length;
-                }, 0)}
+                {GAS_COMPRESSOR_COLUMNS.filter(col => 
+                  extractedTable.wellData.some(r => r.parameters[`${col.mainHeader} - ${col.subHeader}`])
+                ).length}
               </div>
-              <div className="text-sm text-gray-600">High Confidence</div>
+              <div className="text-sm text-gray-600">Columns Detected</div>
+            </div>
+          </div>
+          
+          {/* Column Coverage Analysis */}
+          <div className="mt-6 p-4 bg-gray-50 rounded-lg">
+            <h4 className="text-sm font-medium text-gray-700 mb-3">Column Detection Coverage</h4>
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 text-xs">
+              {GAS_COMPRESSOR_COLUMNS.slice(1).map(col => {
+                const hasData = extractedTable!.wellData.some(r => r.parameters[`${col.mainHeader} - ${col.subHeader}`]);
+                return (
+                  <div key={col.id} className={`p-2 rounded ${hasData ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                    <span className="font-medium">{hasData ? '✅' : '❌'}</span> {col.subHeader}
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
