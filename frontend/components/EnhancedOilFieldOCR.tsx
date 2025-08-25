@@ -1,9 +1,11 @@
 'use client';
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
+import axios from 'axios';
 import { createWorker, PSM, OEM } from 'tesseract.js';
 import { Upload, FileText, CheckCircle, AlertCircle, Edit2, Save, X, Camera, Zap, Grid, Download, Eye, EyeOff, FileImage, FileX } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+
 
 // PDF.js types
 declare global {
@@ -465,6 +467,22 @@ const debugCompressorOCRResults = (ocrData: any) => {
   console.log("===============================");
 };
 
+const getFullUrl = (path: string) => {
+  if (!path) return "";
+  
+  let fullUrl = "";
+  if (path.startsWith("http")) {
+    fullUrl = path;
+  } else {
+    fullUrl = `http://localhost:3001/uploads${path}`;
+  }
+  
+  console.log('Original path:', path);
+  console.log('Generated URL:', fullUrl);
+  return fullUrl;
+};
+
+
 const EnhancedOilFieldOCR: React.FC = () => {
   const { user } = useAuth();
   const [isDragging, setIsDragging] = useState(false);
@@ -485,6 +503,35 @@ const EnhancedOilFieldOCR: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const workerRef = useRef<Tesseract.Worker | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+
+  const [previewFile, setPreviewFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [showPreviewModal, setShowPreviewModal] = useState(false);
+
+  const [segmentationResult, setSegmentationResult] = useState<any>(null);
+  const [viewMode, setViewMode] = useState<"original" | "preview" | "segments">("original");
+  const [activeTab, setActiveTab] = useState<"original" | "preview" | "segments">("original");
+
+  const [selectedSegment, setSelectedSegment] = useState<{ url: string; label: string; confidence: number } | null>(null);
+  const [selectedSegments, setSelectedSegments] = useState<Set<number>>(new Set());
+
+  const segmentLabelMap: Record<string, string> = {
+    title: "Company Name",
+    header_1: "Company Location",
+    header_2: "Date of Registry",
+    table_1: "Column Details",
+    table_2: "Data Entries",
+    footer_1: "Daily Running Hours & Cumulative Hours",
+    footer_2: "Petroleum Oil Lubricant Daily Status",
+    footer_3: "Cumulative Flow Readings",
+    footer_4: "PKG Trip & Change Over Details",
+    footer_5: "Incharge Signature",
+    footer_6: "Remarks",
+    footer_7: "ONGC Incharge Signature",
+  };
+  
+
 
   useEffect(() => {
     loadPDFJS();
@@ -868,7 +915,10 @@ const EnhancedOilFieldOCR: React.FC = () => {
       return;
     }
 
-    processFile(file);
+    // processFile(file);
+    setPreviewFile(file);
+    setPreviewUrl(URL.createObjectURL(file));
+    setShowPreviewModal(true);
   };
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -956,6 +1006,36 @@ const EnhancedOilFieldOCR: React.FC = () => {
       };
     });
   };
+
+  const handleSegmentPreview = async () => {
+    if (!previewFile) return;
+    
+    try {
+      setIsProcessing(true);
+      
+      const formData = new FormData();
+      formData.append('image', previewFile);
+      
+      const response = await axios.post('http://localhost:3001/api/segment-and-ocr', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 60000,
+      });
+      
+      if (response.data.success) {
+        setSegmentationResult(response.data);
+        setActiveTab('preview');
+      } else {
+        setError('Segmentation failed: ' + (response.data.error || 'Unknown error'));
+      }
+      
+    } catch (error: any) {
+      console.error('Segmentation error:', error);
+      setError('Failed to run segmentation: ' + error.message);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+  
 
   const sendToBackend = async () => {
     try {
@@ -1253,6 +1333,221 @@ const EnhancedOilFieldOCR: React.FC = () => {
                   {fileType === 'pdf' && pdfPages.length > 0 && ` • ${pdfPages.length} pages`}
                   {fileType === 'pdf' && ` • Processing page ${selectedPage + 1}`}
                 </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Preview & Segmentation Modal */}
+      {showPreviewModal && previewFile && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 transition">
+          <div className="bg-white shadow-xl rounded-xl p-8 max-w-5xl w-full h-[90vh] flex flex-col relative">
+            {/* Header */}
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-2xl font-bold tracking-wide">
+                {segmentationResult ? "Segmentation Preview" : "File Preview"}
+              </h2>
+
+              {isProcessing && (
+                <div className="flex items-center gap-2 text-blue-600">
+                  <div className="animate-spin h-4 w-4 border-2 border-blue-600 border-t-transparent rounded-full"></div>
+                  <span className="text-sm">Processing...</span>
+                </div>
+              )}
+            </div>
+
+            <hr className="mb-4 opacity-30" />
+
+            {selectedSegment && (
+              <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-60">
+                <div className="bg-white rounded-xl p-4 max-w-3xl w-full max-h-[90vh] flex flex-col relative">
+                  <button
+                    onClick={() => setSelectedSegment(null)}
+                    className="absolute top-4 right-4 p-1 hover:scale-110 transition"
+                  >
+                    <svg
+                      viewBox="0 0 20 20"
+                      width={28}
+                      height={28}
+                      fill="none"
+                      className="stroke-gray-500 hover:stroke-blue-600"
+                    >
+                      <line x1="5" y1="5" x2="15" y2="15" strokeWidth="2" strokeLinecap="round" />
+                      <line x1="15" y1="5" x2="5" y2="15" strokeWidth="2" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                  <img
+                    src={getFullUrl(selectedSegment.url)}
+                    alt={selectedSegment.label}
+                    className="rounded-lg max-h-[80vh] w-full object-contain border"
+                  />
+                  <span className="mt-2 text-center font-medium text-gray-700">
+                    {selectedSegment.label} ({(selectedSegment.confidence * 100).toFixed(0)}%)
+                  </span>
+                </div>
+              </div>
+            )}
+
+
+            {/* Tabs */}
+            {segmentationResult && (
+              <div className="flex gap-2 mb-4 overflow-x-auto">
+                <button
+                  onClick={() => setActiveTab("preview")}
+                  className={`px-4 py-2 rounded-lg font-medium transition ${
+                    activeTab === "preview" ? "bg-blue-600 text-white" : "bg-gray-100 hover:bg-gray-200"
+                  }`}
+                >
+                Segmented Preview ({segmentationResult.preview.detected_objects.length})
+                </button>
+                <button
+                  onClick={() => setActiveTab("segments")}
+                  className={`px-4 py-2 rounded-lg font-medium transition ${
+                    activeTab === "segments" ? "bg-blue-600 text-white" : "bg-gray-100 hover:bg-gray-200"
+                  }`}
+                >
+                  Cropped Segments ({segmentationResult.segments.length})
+                </button>
+              </div>
+            )}
+
+            {/* Preview container */}
+            <div className="flex-1 flex flex-col items-center justify-start transition bg-gray-50 rounded-lg overflow-auto p-4">
+              {previewFile.type.startsWith("image/") ? (
+                <>
+                  {/* Preview tab */}
+                  {activeTab === "preview" && (
+                    <img
+                      src={(() => {
+                        const srcUrl = getFullUrl(segmentationResult?.preview.url) || previewUrl!;
+                        console.log("Preview tab src URL:", srcUrl);
+                        return srcUrl;
+                      })()}
+                      alt="Segmented Preview"
+                      className="rounded-lg max-h-[60vh] max-w-full border-2 border-gray-200 shadow-md object-contain bg-white"
+                    />
+                  )}
+
+                  {/* Original tab */}
+                  {activeTab === "original" && (
+                    <img
+                      src={(() => {
+                        const srcUrl = previewUrl!;
+                        console.log("Original tab src URL:", srcUrl);
+                        return srcUrl;
+                      })()}
+                      alt="Original Preview"
+                      className="rounded-lg max-h-[60vh] max-w-full border-2 border-gray-200 shadow-md object-contain bg-white"
+                    />
+                  )}
+
+                  {/* Cropped Segments tab */}
+                  {activeTab === "segments" && (
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4 w-full overflow-y-auto max-h-[65vh]">
+                      {segmentationResult?.segments.map(
+                        (seg: { url: string; label: string; confidence: number }, i: number) => (
+                          <div
+                            key={i}
+                            className="flex flex-col items-center bg-white rounded-lg shadow p-2"
+                          >
+                            {/* Clickable segment image */}
+                            <img
+                              src={getFullUrl(seg.url)}
+                              alt={`Segment ${i + 1}`}
+                              className="rounded-md max-h-40 object-contain border cursor-pointer hover:scale-105 transition-transform"
+                              onClick={() => setSelectedSegment(seg)}
+                            />
+
+                            {/* Segment label and confidence */}
+                            <span className="text-sm text-gray-600 mt-1">
+                              {segmentLabelMap[seg.label] || seg.label}
+                            </span>
+
+
+                            {/* ✅ Checkbox for selection */}
+                            <label className="mt-2 flex items-center gap-2 text-sm cursor-pointer select-none">
+                              <input
+                                type="checkbox"
+                                checked={selectedSegments.has(i)}
+                                onChange={() => {
+                                  const newSet = new Set(selectedSegments);
+                                  if (newSet.has(i)) newSet.delete(i);
+                                  else newSet.add(i);
+                                  setSelectedSegments(newSet);
+                                }}
+                                className="w-4 h-4 accent-blue-600"
+                              />
+                              Select
+                            </label>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  )}
+
+
+                </>
+              ) : (
+                <div className="text-center text-red-500 font-medium text-lg flex flex-col items-center gap-2">
+                  <span role="img" aria-label="PDF">📄</span>
+                  <span>{previewFile.name}</span>
+                  <span className="text-sm text-gray-400">(PDF preview not supported)</span>
+                </div>
+              )}
+            </div>
+
+            {/* Close button */}
+            <button
+              aria-label="Close"
+              onClick={() => {
+                setShowPreviewModal(false);
+                setPreviewFile(null);
+                setSegmentationResult(null);
+                setActiveTab("original");
+              }}
+              className="absolute right-4 top-4 transition hover:scale-110 p-1"
+            >
+              <svg viewBox="0 0 20 20" width={28} height={28} fill="none" className="stroke-gray-500 hover:stroke-blue-600">
+                <line x1="5" y1="5" x2="15" y2="15" strokeWidth="2" strokeLinecap="round" />
+                <line x1="15" y1="5" x2="5" y2="15" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </button>
+
+            {/* Action buttons */}
+            <div className="flex justify-between mt-5">
+              <div className="flex gap-3">
+                {!segmentationResult && previewFile.type.startsWith("image/") && (
+                  <button
+                    onClick={handleSegmentPreview}
+                    disabled={isProcessing}
+                    className="px-5 py-2 bg-green-600 rounded-lg text-white font-medium hover:bg-green-700 transition disabled:opacity-50"
+                  >
+                    {isProcessing ? "Processing..." : "Run Segmentation"}
+                  </button>
+                )}
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => {
+                    setShowPreviewModal(false);
+                    setPreviewFile(null);
+                    setSegmentationResult(null);
+                    setActiveTab("original");
+                  }}
+                  className="px-5 py-2 bg-gray-100 rounded-lg font-medium hover:bg-gray-200 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    setShowPreviewModal(false);
+                    handleFileUpload(previewFile);
+                  }}
+                  className="px-6 py-2 bg-blue-600 rounded-lg text-white font-semibold hover:bg-blue-700 shadow transition"
+                >
+                  {segmentationResult ? "Proceed data extraction" : "Proceed"}
+                </button>
               </div>
             </div>
           </div>
