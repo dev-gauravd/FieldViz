@@ -38,7 +38,7 @@ class ImprovedDocumentExtractor:
                 'description': 'Date information'
             },
             'main_data_table': {
-                'bbox_ratio': (0.025, 0.125, 0.950, 0.580),  # Large central table
+                'bbox_ratio': (0.012, 0.110, 0.976, 0.580),  # Large central table
                 'description': 'Main operational data table'
             },
             'daily_running_hours': {
