@@ -63,7 +63,7 @@ def draw_segmentation_preview(image_path, results, output_path, confidence_thres
                            outline=color, width=3)
 
             # Draw label
-            text = f"{label} {conf:.2f}"
+            text = f""
             bbox = draw.textbbox((xyxy[0], xyxy[1] - 25), text, font=font)
             draw.rectangle(bbox, fill=color)
             draw.text((xyxy[0], xyxy[1] - 25), text, fill="white", font=font)

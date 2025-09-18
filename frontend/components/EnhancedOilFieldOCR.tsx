@@ -528,7 +528,7 @@ const EnhancedOilFieldOCR: React.FC = () => {
     footer_4: "PKG Trip & Change Over Details",
     footer_5: "Incharge Signature",
     footer_6: "Remarks",
-    footer_7: "ONGC Incharge Signature",
+    footer_7: "Signatures",
   };
   
 
@@ -1344,8 +1344,8 @@ const EnhancedOilFieldOCR: React.FC = () => {
           <div className="bg-white shadow-xl rounded-xl p-8 max-w-5xl w-full h-[90vh] flex flex-col relative">
             {/* Header */}
             <div className="flex justify-between items-center mb-4">
-              <h2 className="text-2xl font-bold tracking-wide">
-                {segmentationResult ? "Segmentation Preview" : "File Preview"}
+              <h2 className="text-2xl font-bold tracking-wide text-black">
+                {segmentationResult ? "Preview" : "File Preview"}
               </h2>
 
               {isProcessing && (
@@ -1382,7 +1382,8 @@ const EnhancedOilFieldOCR: React.FC = () => {
                     className="rounded-lg max-h-[80vh] w-full object-contain border"
                   />
                   <span className="mt-2 text-center font-medium text-gray-700">
-                    {selectedSegment.label} ({(selectedSegment.confidence * 100).toFixed(0)}%)
+                    {/* {selectedSegment.label} */}
+                    {segmentLabelMap[selectedSegment.label] || selectedSegment.label}
                   </span>
                 </div>
               </div>
@@ -1395,18 +1396,18 @@ const EnhancedOilFieldOCR: React.FC = () => {
                 <button
                   onClick={() => setActiveTab("preview")}
                   className={`px-4 py-2 rounded-lg font-medium transition ${
-                    activeTab === "preview" ? "bg-blue-600 text-white" : "bg-gray-100 hover:bg-gray-200"
+                    activeTab === "preview" ? "bg-blue-600 text-white" : "bg-gray-400 hover:bg-gray-500"
                   }`}
                 >
-                Segmented Preview ({segmentationResult.preview.detected_objects.length})
+                Detected Regions
                 </button>
                 <button
                   onClick={() => setActiveTab("segments")}
                   className={`px-4 py-2 rounded-lg font-medium transition ${
-                    activeTab === "segments" ? "bg-blue-600 text-white" : "bg-gray-100 hover:bg-gray-200"
+                    activeTab === "segments" ? "bg-blue-600 text-white" : "bg-gray-400 hover:bg-gray-500"
                   }`}
                 >
-                  Cropped Segments ({segmentationResult.segments.length})
+                  Select Regions
                 </button>
               </div>
             )}
@@ -1423,8 +1424,8 @@ const EnhancedOilFieldOCR: React.FC = () => {
                         console.log("Preview tab src URL:", srcUrl);
                         return srcUrl;
                       })()}
-                      alt="Segmented Preview"
-                      className="rounded-lg max-h-[60vh] max-w-full border-2 border-gray-200 shadow-md object-contain bg-white"
+                      alt="Selected region"
+                      className="rounded-lg max-h-[60vh] max-w-full border-2 border-gray-200 shadow-md object-contain bg-black"
                     />
                   )}
 
@@ -1465,7 +1466,7 @@ const EnhancedOilFieldOCR: React.FC = () => {
 
 
                             {/* ✅ Checkbox for selection */}
-                            <label className="mt-2 flex items-center gap-2 text-sm cursor-pointer select-none">
+                            <label className="mt-2 flex items-center gap-2 text-sm cursor-pointer select-none text-blue-600">
                               <input
                                 type="checkbox"
                                 checked={selectedSegments.has(i)}
@@ -1515,41 +1516,35 @@ const EnhancedOilFieldOCR: React.FC = () => {
 
             {/* Action buttons */}
             <div className="flex justify-between mt-5">
-              <div className="flex gap-3">
-                {!segmentationResult && previewFile.type.startsWith("image/") && (
-                  <button
-                    onClick={handleSegmentPreview}
-                    disabled={isProcessing}
-                    className="px-5 py-2 bg-green-600 rounded-lg text-white font-medium hover:bg-green-700 transition disabled:opacity-50"
-                  >
-                    {isProcessing ? "Processing..." : "Run Segmentation"}
-                  </button>
-                )}
-              </div>
-
-              <div className="flex gap-3">
-                <button
-                  onClick={() => {
-                    setShowPreviewModal(false);
-                    setPreviewFile(null);
-                    setSegmentationResult(null);
-                    setActiveTab("original");
-                  }}
-                  className="px-5 py-2 bg-gray-100 rounded-lg font-medium hover:bg-gray-200 transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => {
-                    setShowPreviewModal(false);
-                    handleFileUpload(previewFile);
-                  }}
-                  className="px-6 py-2 bg-blue-600 rounded-lg text-white font-semibold hover:bg-blue-700 shadow transition"
-                >
-                  {segmentationResult ? "Proceed data extraction" : "Proceed"}
-                </button>
-              </div>
+            <div className="flex gap-3">
+              {/* Removed old green Run Segmentation button */}
             </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowPreviewModal(false);
+                  setPreviewFile(null);
+                  setSegmentationResult(null);
+                  setActiveTab("original");
+                }}
+                className="px-5 py-2 bg-gray-400 rounded-lg font-medium hover:bg-gray-500 transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSegmentPreview}
+                disabled={isProcessing}
+                className="px-6 py-2 bg-blue-600 rounded-lg text-white font-semibold hover:bg-blue-1000 shadow transition disabled:opacity-50"
+              >
+                {isProcessing
+                  ? "Processing..."
+                  : segmentationResult
+                  ? "Export to Excel"
+                  : "Proceed"}
+              </button>
+            </div>
+          </div>
           </div>
         </div>
       )}
