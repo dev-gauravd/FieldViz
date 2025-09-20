@@ -516,6 +516,10 @@ const EnhancedOilFieldOCR: React.FC = () => {
   const [selectedSegment, setSelectedSegment] = useState<{ url: string; label: string; confidence: number } | null>(null);
   const [selectedSegments, setSelectedSegments] = useState<Set<number>>(new Set());
 
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportResults, setExportResults] = useState<any>(null);
+  const [showExportModal, setShowExportModal] = useState(false);
+
   const segmentLabelMap: Record<string, string> = {
     title: "Company Name",
     header_1: "Company Location",
@@ -1010,9 +1014,16 @@ const EnhancedOilFieldOCR: React.FC = () => {
   const handleSegmentPreview = async () => {
     if (!previewFile) return;
     
+    setIsProcessing(true);
+    
     try {
-      setIsProcessing(true);
-      
+      // If we already have segmentation results and there are selected segments, export to Excel
+      if (segmentationResult && selectedSegments.size > 0) {
+        await handleExportToExcel();
+        return;
+      }
+  
+      // Otherwise, run segmentation first (your existing logic)
       const formData = new FormData();
       formData.append('image', previewFile);
       
@@ -1023,19 +1034,235 @@ const EnhancedOilFieldOCR: React.FC = () => {
       
       if (response.data.success) {
         setSegmentationResult(response.data);
-        setActiveTab('preview');
+        setActiveTab('segments'); // Changed from 'preview' to 'segments' to show segments for selection
       } else {
         setError('Segmentation failed: ' + (response.data.error || 'Unknown error'));
       }
       
     } catch (error: any) {
-      console.error('Segmentation error:', error);
-      setError('Failed to run segmentation: ' + error.message);
+      console.error('Segmentation/Export error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
+      setError('Failed to run segmentation: ' + errorMessage);
     } finally {
       setIsProcessing(false);
     }
   };
+  // export excel testing
+  const handleExportToExcel = async () => {
+    if (!segmentationResult || selectedSegments.size === 0) {
+      alert('Please select at least one segment to export');
+      return;
+    }
   
+    setIsExporting(true);
+    
+    try {
+      const selectedSegmentsArray = Array.from(selectedSegments);
+      
+      console.log('Exporting segments:', selectedSegmentsArray);
+  
+      const response = await fetch('http://localhost:3001/api/export-to-excel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          selectedSegments: selectedSegmentsArray,
+          segmentationResult: segmentationResult
+        }),
+      });
+  
+      if (!response.ok) {
+        throw new Error(`Export failed: ${response.statusText}`);
+      }
+  
+      const result = await response.json();
+      
+      if (result.success) {
+        setExportResults(result);
+        setShowExportModal(true);
+        
+        // Show success message
+        alert(`Successfully exported ${result.summary.successful} segments to Excel!`);
+        
+        // Auto-download if there are successful exports
+        if (result.results && result.results.length > 0) {
+          const successfulExports = result.results.filter((r: any) => r.status === 'success');
+          
+          // Download the first successful export automatically
+          if (successfulExports.length > 0 && successfulExports[0].excel_path) {
+            const timestamp = successfulExports[0].timestamp;
+            const downloadUrl = `http://localhost:3001/api/download-excel/${timestamp}/table_data.xlsx`;
+            
+            // Create a temporary link and trigger download
+            const link = document.createElement('a');
+            link.href = downloadUrl;
+            link.download = `table_data_${timestamp}.xlsx`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+          }
+        }
+      } else {
+        throw new Error(result.message || 'Export failed');
+      }
+  
+    } catch (error) {
+      console.error('Export error:', error);
+      console.error('Preview/Export error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
+      alert(`Error: ${errorMessage}`);
+    } finally {
+      setIsProcessing(false);
+      setIsExporting(false);
+    }
+  };
+  
+  // Component for Export Results Modal
+  const ExportResultsModal = () => {
+    if (!showExportModal || !exportResults) return null;
+  
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <div className="bg-white rounded-lg max-w-2xl w-full max-h-[80vh] overflow-auto p-6">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-bold text-gray-800">Export Results</h2>
+            <button
+              onClick={() => setShowExportModal(false)}
+              className="text-gray-500 hover:text-gray-700"
+            >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+  
+          {/* Summary */}
+          <div className="mb-6 p-4 bg-gray-50 rounded-lg">
+            <h3 className="font-semibold mb-2">Summary</h3>
+            <div className="grid grid-cols-3 gap-4 text-sm">
+              <div>
+                <span className="text-gray-600">Total:</span>
+                <span className="ml-2 font-medium">{exportResults.summary.total}</span>
+              </div>
+              <div>
+                <span className="text-gray-600">Successful:</span>
+                <span className="ml-2 font-medium text-green-600">{exportResults.summary.successful}</span>
+              </div>
+              <div>
+                <span className="text-gray-600">Failed:</span>
+                <span className="ml-2 font-medium text-red-600">{exportResults.summary.failed}</span>
+              </div>
+            </div>
+          </div>
+  
+          {/* Results List */}
+          <div className="space-y-3">
+            <h3 className="font-semibold">Individual Results</h3>
+            {exportResults.results.map((result: any, index: number) => (
+              <div 
+                key={index} 
+                className={`p-3 rounded-lg border ${
+                  result.status === 'success' 
+                    ? 'border-green-200 bg-green-50' 
+                    : 'border-red-200 bg-red-50'
+                }`}
+              >
+                <div className="flex justify-between items-start">
+                  <div className="flex-1">
+                    <div className="font-medium">
+                      Segment {result.segmentIndex + 1}
+                      {result.segmentLabel && (
+                        <span className="ml-2 text-sm text-gray-600">({result.segmentLabel})</span>
+                      )}
+                    </div>
+                    <div className={`text-sm mt-1 ${
+                      result.status === 'success' ? 'text-green-600' : 'text-red-600'
+                    }`}>
+                      {result.message}
+                    </div>
+                    {result.status === 'success' && result.timestamp && (
+                      <div className="text-xs text-gray-500 mt-1">
+                        Export ID: {result.timestamp}
+                      </div>
+                    )}
+                  </div>
+                  
+                  {result.status === 'success' && result.excel_path && result.timestamp && (
+                    <a
+                      href={`http://localhost:3001/api/download-excel/${result.timestamp}/table_data.xlsx`}
+                      download={`table_data_${result.timestamp}.xlsx`}
+                      className="ml-4 px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 transition"
+                    >
+                      Download
+                    </a>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+  
+          <div className="mt-6 flex justify-end">
+            <button
+              onClick={() => setShowExportModal(false)}
+              className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Update the button text based on state
+  const getButtonText = () => {
+    if (isExporting) return "Exporting...";
+    if (isProcessing) return "Processing...";
+    if (segmentationResult && selectedSegments.size > 0) return "Export to Excel";
+    if (segmentationResult) return "Select segments to export";
+    return "Proceed";
+  };
+
+  const isButtonDisabled = () => {
+    return isProcessing || isExporting || (segmentationResult && selectedSegments.size === 0);
+  };
+
+  const ExportButton = () => (
+    <button
+      onClick={handleSegmentPreview}
+      disabled={isButtonDisabled()}
+      className={`px-6 py-2 rounded-lg font-semibold shadow transition ${
+        isButtonDisabled()
+          ? 'bg-gray-400 text-gray-600 cursor-not-allowed'
+          : segmentationResult && selectedSegments.size > 0
+          ? 'bg-green-600 text-white hover:bg-green-700'
+          : 'bg-blue-600 text-white hover:bg-blue-700'
+      }`}
+    >
+      {getButtonText()}
+    </button>
+  );
+  
+  // Add selection info display
+  const SelectionInfo = () => {
+    if (!segmentationResult || activeTab !== "segments") return null;
+  
+    return (
+      <div className="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
+        <div className="text-sm text-blue-800">
+          <span className="font-medium">
+            {selectedSegments.size} of {segmentationResult.segments.length} segments selected
+          </span>
+          {selectedSegments.size > 0 && (
+            <div className="mt-1 text-xs">
+              Selected: {Array.from(selectedSegments).map(i => `#${i + 1}`).join(', ')}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   const sendToBackend = async () => {
     try {
@@ -1534,14 +1761,16 @@ const EnhancedOilFieldOCR: React.FC = () => {
               </button>
               <button
                 onClick={handleSegmentPreview}
-                disabled={isProcessing}
-                className="px-6 py-2 bg-blue-600 rounded-lg text-white font-semibold hover:bg-blue-1000 shadow transition disabled:opacity-50"
+                disabled={isButtonDisabled()}
+                className={`px-6 py-2 rounded-lg font-semibold shadow transition ${
+                  isButtonDisabled()
+                    ? 'bg-gray-400 text-gray-600 cursor-not-allowed opacity-50'
+                    : segmentationResult && selectedSegments.size > 0
+                    ? 'bg-green-600 text-white hover:bg-green-700'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                }`}
               >
-                {isProcessing
-                  ? "Processing..."
-                  : segmentationResult
-                  ? "Export to Excel"
-                  : "Proceed"}
+                {getButtonText()}
               </button>
             </div>
           </div>
