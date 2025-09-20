@@ -10,6 +10,7 @@ const fs = require('fs').promises;
 const fsSync = require('fs'); // CHANGE 1: Added for sync operations
 require('dotenv').config();
 
+const { spawn } = require('child_process');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
@@ -884,6 +885,452 @@ app.post('/api/segment-and-ocr', upload.single('image'), async (req, res) => {
   }
 });
 
+
+// exporting to excel function
+// export to excel route later maybe modify the data route to accept excel export query
+
+app.post('/api/export-to-excel', async (req, res) => {
+  try {
+    const { selectedSegments, segmentationResult } = req.body;
+    
+    console.log('Received export request:', {
+      selectedSegmentsCount: selectedSegments?.length || 0,
+      hasSegmentationResult: !!segmentationResult
+    });
+
+    // Validate request data
+    if (!selectedSegments || selectedSegments.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No segments selected for export'
+      });
+    }
+
+    if (!segmentationResult || !segmentationResult.segments) {
+      return res.status(400).json({
+        success: false,
+        message: 'No segmentation result provided'
+      });
+    }
+
+    // Process each selected segment
+    const exportResults = [];
+    const baseOutputDir = path.join(__dirname, 'exports');
+    const modelsDir = path.join(__dirname,  '..','segmentation', 'Segmentation_Studio', 'models');
+    
+    console.log('Paths:', {
+      baseOutputDir,
+      modelsDir,
+      __dirname
+    });
+    
+    // Ensure output directory exists
+    if (!fsSync.existsSync(baseOutputDir)) {
+      fsSync.mkdirSync(baseOutputDir, { recursive: true });
+      console.log('Created exports directory');
+    }
+
+    // Verify models directory exists
+    if (!fsSync.existsSync(modelsDir)) {
+      console.error('Models directory not found:', modelsDir);
+      return res.status(500).json({
+        success: false,
+        message: `Models directory not found: ${modelsDir}`
+      });
+    }
+
+    // Verify model files exist
+    const columnModelPath = path.join(modelsDir, 'column_detect.pt');
+    const rowModelPath = path.join(modelsDir, 'row_detect.pt');
+    
+    console.log('Checking model files:', {
+      columnModelPath,
+      rowModelPath,
+      columnExists: fsSync.existsSync(columnModelPath),
+      rowExists: fsSync.existsSync(rowModelPath)
+    });
+    
+    if (!fsSync.existsSync(columnModelPath)) {
+      return res.status(500).json({
+        success: false,
+        message: `Column detection model not found: ${columnModelPath}`
+      });
+    }
+    
+    if (!fsSync.existsSync(rowModelPath)) {
+      return res.status(500).json({
+        success: false,
+        message: `Row detection model not found: ${rowModelPath}`
+      });
+    }
+
+    console.log('All file checks passed, processing segments...');
+
+    // Process selected segments sequentially
+    for (let i = 0; i < selectedSegments.length; i++) {
+      const segmentIndex = selectedSegments[i];
+      const segment = segmentationResult.segments[segmentIndex];
+      
+      if (!segment || !segment.url) {
+        console.warn(`Invalid segment at index ${segmentIndex}`);
+        exportResults.push({
+          segmentIndex,
+          status: 'error',
+          message: `Invalid segment at index ${segmentIndex}`
+        });
+        continue;
+      }
+
+      try {
+        // Get the full path to the segment image
+        const segmentImagePath = path.join(__dirname, 'uploads', segment.url);
+        
+        console.log('Processing segment:', {
+          index: segmentIndex,
+          url: segment.url,
+          fullPath: segmentImagePath,
+          exists: fsSync.existsSync(segmentImagePath)
+        });
+        
+        // Verify segment image exists
+        if (!fsSync.existsSync(segmentImagePath)) {
+          console.warn(`Segment image not found: ${segmentImagePath}`);
+          exportResults.push({
+            segmentIndex,
+            status: 'error',
+            message: `Segment image not found: ${segment.url}`
+          });
+          continue;
+        }
+
+        console.log(`Processing segment ${i + 1}/${selectedSegments.length}:`, segment.url);
+
+        // Create Python process to handle this segment
+        const result = await runPythonWorkflow(segmentImagePath, baseOutputDir, modelsDir);
+        
+        exportResults.push({
+          segmentIndex,
+          segmentUrl: segment.url,
+          segmentLabel: segment.label,
+          ...result
+        });
+
+      } catch (error) {
+        console.error(`Error processing segment ${segmentIndex}:`, error);
+        exportResults.push({
+          segmentIndex,
+          status: 'error',
+          message: error.message
+        });
+      }
+    }
+
+    // Check if any exports were successful
+    const successfulExports = exportResults.filter(r => r.status === 'success');
+    const failedExports = exportResults.filter(r => r.status === 'error');
+
+    console.log('Export completed:', {
+      total: selectedSegments.length,
+      successful: successfulExports.length,
+      failed: failedExports.length
+    });
+
+    res.json({
+      success: successfulExports.length > 0,
+      message: `Exported ${successfulExports.length} segments successfully. ${failedExports.length} failed.`,
+      results: exportResults,
+      summary: {
+        total: selectedSegments.length,
+        successful: successfulExports.length,
+        failed: failedExports.length
+      }
+    });
+
+  } catch (error) {
+    console.error('Export to Excel error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error during export',
+      error: error.message
+    });
+  }
+});
+
+// Helper function to run Python workflow
+function runPythonWorkflow(segmentImagePath, outputDir, modelsDir) {
+  return new Promise((resolve, reject) => {
+    const workflowPath = path.join(__dirname, "..",'segmentation', 'Segmentation_Studio', 'workflow.py');
+    
+    console.log('Python workflow details:', {
+      workflowPath,
+      segmentImagePath,
+      outputDir,
+      modelsDir,
+      workflowExists: fsSync.existsSync(workflowPath)
+    });
+    
+    // Verify workflow.py exists
+    if (!fsSync.existsSync(workflowPath)) {
+      return reject(new Error(`Workflow script not found: ${workflowPath}`));
+    }
+
+    console.log('Starting Python process...');
+    const pythonProcess = spawn('python', [
+      workflowPath,
+      segmentImagePath,
+      outputDir,
+      modelsDir
+    ]);
+
+    let stdout = '';
+    let stderr = '';
+
+    pythonProcess.stdout.on('data', (data) => {
+      const output = data.toString();
+      console.log('Python stdout:', output);
+      stdout += output;
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+      const output = data.toString();
+      console.error('Python stderr:', output);
+      stderr += output;
+    });
+
+    pythonProcess.on('close', (code) => {
+      console.log(`Python process exited with code ${code}`);
+      console.log('Final stdout:', stdout);
+      console.log('Final stderr:', stderr);
+      
+      if (code === 0) {
+        try {
+          // Try to parse the last line as JSON (our result)
+          const lines = stdout.trim().split('\n');
+          let result = null;
+          
+          // Look for JSON result (usually the last line)
+          for (let i = lines.length - 1; i >= 0; i--) {
+            try {
+              const line = lines[i].trim();
+              if (line.startsWith('{') && line.endsWith('}')) {
+                result = JSON.parse(line);
+                break;
+              }
+            } catch (e) {
+              // Continue looking for valid JSON
+            }
+          }
+          
+          if (result && result.status) {
+            console.log('Parsed Python result:', result);
+            resolve(result);
+          } else {
+            console.log('No JSON result found, using default success response');
+            resolve({
+              status: 'success',
+              message: 'Excel export completed',
+              output: stdout,
+              timestamp: new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19)
+            });
+          }
+        } catch (parseError) {
+          console.error('Error parsing Python output:', parseError);
+          resolve({
+            status: 'success',
+            message: 'Excel export completed (output parsing failed)',
+            output: stdout,
+            timestamp: new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19)
+          });
+        }
+      } else {
+        console.error(`Python process failed with code ${code}`);
+        reject(new Error(`Python process failed with code ${code}. stderr: ${stderr}`));
+      }
+    });
+
+    pythonProcess.on('error', (error) => {
+      console.error('Failed to start Python process:', error);
+      reject(new Error(`Failed to start Python process: ${error.message}`));
+    });
+
+    // Set a timeout for long-running processes (e.g., 5 minutes)
+    setTimeout(() => {
+      console.log('Python process timeout, killing...');
+      pythonProcess.kill();
+      reject(new Error('Python process timeout after 5 minutes'));
+    }, 300000);
+  });
+}
+
+// Additional endpoint to download generated Excel files
+app.get('/api/download-excel/:timestamp/:filename', (req, res) => {
+  try {
+    const { timestamp, filename } = req.params;
+    const baseOutputDir = path.join(__dirname, 'exports');
+    const filePath = path.join(baseOutputDir, `export_${timestamp}`, 'Excel', filename);
+    
+    console.log('Download request:', {
+      timestamp,
+      filename,
+      filePath,
+      exists: fsSync.existsSync(filePath)
+    });
+    
+    // Verify file exists and is within allowed directory
+    if (!fsSync.existsSync(filePath)) {
+      return res.status(404).json({
+        success: false,
+        message: 'File not found'
+      });
+    }
+
+    // Security check: ensure the file is within the exports directory
+    const resolvedPath = path.resolve(filePath);
+    const resolvedBaseDir = path.resolve(baseOutputDir);
+    
+    if (!resolvedPath.startsWith(resolvedBaseDir)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    // Set appropriate headers for Excel file download
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    
+    // Stream the file
+    const fileStream = fsSync.createReadStream(filePath);
+    fileStream.pipe(res);
+    
+    fileStream.on('error', (error) => {
+      console.error('Error streaming file:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          message: 'Error downloading file'
+        });
+      }
+    });
+    
+  } catch (error) {
+    console.error('Download Excel error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error during download',
+      error: error.message
+    });
+  }
+});
+
+// Endpoint to list available exports
+app.get('/api/exports', (req, res) => {
+  try {
+    const baseOutputDir = path.join(__dirname, 'exports');
+    
+    if (!fsSync.existsSync(baseOutputDir)) {
+      return res.json({
+        success: true,
+        exports: []
+      });
+    }
+
+    const exports = [];
+    const exportDirs = fsSync.readdirSync(baseOutputDir)
+      .filter(item => {
+        const itemPath = path.join(baseOutputDir, item);
+        return fsSync.statSync(itemPath).isDirectory() && item.startsWith('export_');
+      });
+
+    for (const exportDir of exportDirs) {
+      const timestamp = exportDir.replace('export_', '');
+      const excelDir = path.join(baseOutputDir, exportDir, 'Excel');
+      
+      if (fsSync.existsSync(excelDir)) {
+        const excelFiles = fsSync.readdirSync(excelDir)
+          .filter(file => file.endsWith('.xlsx'))
+          .map(file => {
+            const filePath = path.join(excelDir, file);
+            const stats = fsSync.statSync(filePath);
+            return {
+              filename: file,
+              size: stats.size,
+              created: stats.birthtime,
+              downloadUrl: `/api/download-excel/${timestamp}/${file}`
+            };
+          });
+
+        if (excelFiles.length > 0) {
+          exports.push({
+            timestamp,
+            exportDir: exportDir,
+            files: excelFiles
+          });
+        }
+      }
+    }
+
+    // Sort by timestamp (newest first)
+    exports.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+
+    res.json({
+      success: true,
+      exports
+    });
+
+  } catch (error) {
+    console.error('List exports error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error listing exports',
+      error: error.message
+    });
+  }
+});
+
+// Endpoint to clean up old exports (optional)
+app.delete('/api/exports/:timestamp', (req, res) => {
+  try {
+    const { timestamp } = req.params;
+    const baseOutputDir = path.join(__dirname, 'exports');
+    const exportDir = path.join(baseOutputDir, `export_${timestamp}`);
+    
+    if (!fsSync.existsSync(exportDir)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Export not found'
+      });
+    }
+
+    // Security check
+    const resolvedPath = path.resolve(exportDir);
+    const resolvedBaseDir = path.resolve(baseOutputDir);
+    
+    if (!resolvedPath.startsWith(resolvedBaseDir)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    // Recursively delete the export directory
+    fsSync.rmSync(exportDir, { recursive: true, force: true });
+
+    res.json({
+      success: true,
+      message: `Export ${timestamp} deleted successfully`
+    });
+
+  } catch (error) {
+    console.error('Delete export error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting export',
+      error: error.message
+    });
+  }
+});
+
 // CHANGE 5: 404 handler moved to the very end
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Route not found' });
@@ -894,3 +1341,5 @@ app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
   res.status(500).json({ error: 'Internal server error' });
 });
+
+
