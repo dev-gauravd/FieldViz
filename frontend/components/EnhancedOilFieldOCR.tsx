@@ -519,6 +519,8 @@ const EnhancedOilFieldOCR: React.FC = () => {
   const [isExporting, setIsExporting] = useState(false);
   const [exportResults, setExportResults] = useState<any>(null);
   const [showExportModal, setShowExportModal] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
 
   const segmentLabelMap: Record<string, string> = {
     title: "Company Name",
@@ -1083,8 +1085,9 @@ const EnhancedOilFieldOCR: React.FC = () => {
         setShowExportModal(true);
         
         // Show success message
-        alert(`Successfully exported ${result.summary.successful} segments to Excel!`);
-        
+        setToastMessage(`Export successful ${result.summary.successful} segments saved to Excel`);
+        setTimeout(() => setToastMessage(null), 3000)
+
         // Auto-download if there are successful exports
         if (result.results && result.results.length > 0) {
           const successfulExports = result.results.filter((r: any) => r.status === 'success');
@@ -1117,6 +1120,7 @@ const EnhancedOilFieldOCR: React.FC = () => {
       setIsExporting(false);
     }
   };
+  
   
   // Component for Export Results Modal
   const ExportResultsModal = () => {
@@ -1723,6 +1727,16 @@ const EnhancedOilFieldOCR: React.FC = () => {
                 </div>
               )}
             </div>
+            
+            {/* popup notification */}
+            {toastMessage && (
+              <div className="fixed inset-0 flex items-center justify-center z-50">
+                <div className="bg-green-500 text-white px-6 py-3 rounded-lg shadow-lg text-center">
+                  {toastMessage}
+                </div>
+              </div>
+            )}
+
 
             {/* Close button */}
             <button
